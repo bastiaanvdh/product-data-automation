@@ -1,0 +1,311 @@
+﻿<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Product Import Generator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; background: #F5F7FA; color: #1F2933; }
+
+  header {
+    background: #002B5C; color: #fff; padding: 14px 24px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  header .logo { font-size: 22px; font-weight: bold; }
+  header .titel { font-size: 14px; color: #00A3A1; }
+
+  main { max-width: 900px; margin: 32px auto; padding: 0 16px; }
+
+  .kaart {
+    background: #fff; border-radius: 8px; border: 1px solid #DDE1E7;
+    padding: 24px; margin-bottom: 20px;
+  }
+  .kaart h2 { color: #002B5C; font-size: 15px; margin-bottom: 16px; }
+
+  .stap-nummer {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; background: #002B5C; color: #fff;
+    border-radius: 50%; font-size: 12px; font-weight: bold; margin-right: 8px;
+  }
+
+  label { font-size: 13px; display: block; margin-bottom: 6px; color: #374151; }
+  input[type="file"], input[type="text"], input[type="password"], select {
+    width: 100%; padding: 8px 10px; border: 1px solid #CBD5E1;
+    border-radius: 5px; font-size: 13px; background: #fff;
+  }
+  input[type="file"] { cursor: pointer; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+  .badge {
+    display: inline-block; font-size: 11px; padding: 2px 8px;
+    border-radius: 10px; font-weight: bold;
+  }
+  .badge-ok  { background: #D1FAE5; color: #065F46; }
+  .badge-mis { background: #FEE2E2; color: #991B1B; }
+
+  .preview-tabel {
+    width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px;
+  }
+  .preview-tabel th {
+    background: #002B5C; color: #fff; padding: 6px 10px; text-align: left;
+  }
+  .preview-tabel td { padding: 5px 10px; border-bottom: 1px solid #E5E7EB; }
+  .preview-tabel tr:nth-child(even) td { background: #F9FAFB; }
+
+  .btn {
+    display: inline-block; padding: 10px 22px; border: none; border-radius: 5px;
+    font-size: 14px; font-weight: bold; cursor: pointer;
+  }
+  .btn-primair { background: #002B5C; color: #fff; }
+  .btn-primair:hover { background: #00A3A1; }
+  .btn-stop { background: #DC2626; color: #fff; }
+  .btn-download { background: #059669; color: #fff; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .progress-balk {
+    height: 10px; background: #E5E7EB; border-radius: 5px; overflow: hidden;
+    margin: 12px 0 4px;
+  }
+  .progress-vulling {
+    height: 100%; background: #00A3A1; border-radius: 5px;
+    transition: width 0.3s;
+  }
+  .progress-tekst { font-size: 12px; color: #6B7280; }
+
+  #log-box {
+    background: #1F2933; color: #A8C0D0; font-family: "Courier New", monospace;
+    font-size: 11px; padding: 12px; border-radius: 5px; height: 220px;
+    overflow-y: auto; margin-top: 12px;
+  }
+  .log-success { color: #6EE7B7; }
+  .log-warning { color: #FCD34D; }
+  .log-error   { color: #FCA5A5; }
+
+  .verberg { display: none; }
+  .ref-paden { font-size: 11px; color: #6B7280; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">ERP</span>
+  <span class="titel">Product Import Generator – KING ERP</span>
+</header>
+
+<main>
+
+  <!-- REF STATUS -->
+  <div class="kaart">
+    <h2>Referentiedata status</h2>
+    <div class="grid-2">
+      <div>
+        <span class="badge {{ 'badge-ok' if attrib_ok else 'badge-mis' }}">
+          {{ '✓' if attrib_ok else '✗' }} Attribuutset V4
+        </span>
+        <p class="ref-paden">{{ attrib_pad }}</p>
+      </div>
+      <div>
+        <span class="badge {{ 'badge-ok' if cat_ok else 'badge-mis' }}">
+          {{ '✓' if cat_ok else '✗' }} Categorieindeling
+        </span>
+        <p class="ref-paden">{{ cat_pad }}</p>
+      </div>
+    </div>
+    {% if not attrib_ok or not cat_ok %}
+    <p style="color:#B45309;font-size:12px;margin-top:10px;">
+      ⚠ Ontbrekende referentiebestanden: kopieer ze naar de <strong>referentiedata/</strong> map.
+      De generator werkt ook zonder, maar confidence zal laag zijn.
+    </p>
+    {% endif %}
+  </div>
+
+  <!-- STAP 1: UPLOAD -->
+  <div class="kaart">
+    <h2><span class="stap-nummer">1</span> Invoerbestand uploaden</h2>
+    <label>Excel of CSV met producten (verplicht: Artikelnummer, Omschrijving, Merk)</label>
+    <div style="margin-bottom:10px;">
+      <a href="/template" class="btn" style="background:#E5E7EB;color:#374151;font-size:12px;padding:6px 14px;text-decoration:none;">
+        ⬇ Download invultemplate
+      </a>
+    </div>
+    <input type="file" id="invoer-bestand" accept=".xlsx,.xls,.csv">
+    <div style="margin-top: 12px;">
+      <button class="btn btn-primair" onclick="uploadBestand()">Bestand laden</button>
+      <span id="upload-status" style="font-size:13px;margin-left:12px;"></span>
+    </div>
+    <div id="preview-sectie" class="verberg">
+      <table class="preview-tabel" id="preview-tabel"></table>
+    </div>
+  </div>
+
+  <!-- STAP 2: INSTELLINGEN -->
+  <div class="kaart">
+    <h2><span class="stap-nummer">2</span> Instellingen</h2>
+    <div style="max-width: 300px;">
+      <label>Model</label>
+      <select id="model">
+        <option value="gpt-4o-mini" selected>gpt-4o-mini (snel &amp; goedkoop)</option>
+        <option value="gpt-4o">gpt-4o (beter, langzamer)</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- STAP 3: VERWERKEN -->
+  <div class="kaart">
+    <h2><span class="stap-nummer">3</span> Verwerken</h2>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <button class="btn btn-primair" id="start-knop" onclick="startVerwerking()" disabled>
+        ▶ Start genereren
+      </button>
+      <button class="btn btn-stop verberg" id="stop-knop" onclick="stopVerwerking()">
+        ■ Stop
+      </button>
+    </div>
+
+    <div id="voortgang-sectie" class="verberg">
+      <div class="progress-balk"><div class="progress-vulling" id="progress-balk" style="width:0%"></div></div>
+      <span class="progress-tekst" id="progress-tekst">0 / 0</span>
+      <div id="log-box"></div>
+    </div>
+
+    <div id="download-sectie" class="verberg" style="margin-top:16px;">
+      <button class="btn btn-download" id="download-knop" onclick="downloadExcel()">
+        ⬇ Download KING Import Excel
+      </button>
+      <button class="btn" style="background:#E5E7EB;margin-left:10px;" onclick="opnieuw()">
+        Opnieuw starten
+      </button>
+    </div>
+  </div>
+
+</main>
+
+<script>
+let pollingInterval = null;
+let huidigOutputBestand = null;
+
+// ── Upload ──
+async function uploadBestand() {
+  const bestand = document.getElementById('invoer-bestand').files[0];
+  if (!bestand) { alert('Selecteer eerst een bestand.'); return; }
+
+  const status = document.getElementById('upload-status');
+  status.textContent = 'Laden...';
+
+  const fd = new FormData();
+  fd.append('invoer', bestand);
+
+  try {
+    const resp = await fetch('/upload', { method: 'POST', body: fd });
+    const data = await resp.json();
+    if (!data.ok) {
+      status.textContent = '✗ ' + data.error;
+      status.style.color = '#DC2626';
+      return;
+    }
+
+    status.textContent = `✓ ${data.count} producten geladen`;
+    status.style.color = '#059669';
+
+    toonPreview(data.preview);
+    document.getElementById('start-knop').disabled = false;
+  } catch (e) {
+    status.textContent = '✗ Upload mislukt: ' + e;
+    status.style.color = '#DC2626';
+  }
+}
+
+function toonPreview(preview) {
+  const sectie = document.getElementById('preview-sectie');
+  const tabel  = document.getElementById('preview-tabel');
+  if (!preview || !preview.length) return;
+
+  const headers = Object.keys(preview[0]);
+  tabel.innerHTML = `<thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead>` +
+    `<tbody>${preview.map(r =>
+      `<tr>${headers.map(h => `<td>${r[h] ?? ''}</td>`).join('')}</tr>`
+    ).join('')}</tbody>`;
+  sectie.classList.remove('verberg');
+}
+
+// ── Start ──
+async function startVerwerking() {
+  const model = document.getElementById('model').value;
+
+  document.getElementById('start-knop').disabled = true;
+  document.getElementById('stop-knop').classList.remove('verberg');
+  document.getElementById('voortgang-sectie').classList.remove('verberg');
+  document.getElementById('download-sectie').classList.add('verberg');
+  document.getElementById('log-box').innerHTML = '';
+
+  const resp = await fetch('/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: model }),
+  });
+  const data = await resp.json();
+  if (!data.ok) {
+    alert('Fout: ' + data.error);
+    document.getElementById('start-knop').disabled = false;
+    return;
+  }
+
+  pollingInterval = setInterval(peilVoortgang, 1500);
+}
+
+async function peilVoortgang() {
+  try {
+    const resp = await fetch('/progress');
+    const data = await resp.json();
+
+    const pct = data.total > 0 ? Math.round((data.current / data.total) * 100) : 0;
+    document.getElementById('progress-balk').style.width = pct + '%';
+    document.getElementById('progress-tekst').textContent = `${data.current} / ${data.total} producten`;
+
+    const logBox = document.getElementById('log-box');
+    logBox.innerHTML = data.log.map(l =>
+      `<div class="log-${l.type}">[${l.time}] ${l.msg}</div>`
+    ).join('');
+    logBox.scrollTop = logBox.scrollHeight;
+
+    if (data.done) {
+      clearInterval(pollingInterval);
+      document.getElementById('stop-knop').classList.add('verberg');
+
+      if (data.output_bestand) {
+        huidigOutputBestand = data.output_bestand;
+        document.getElementById('download-sectie').classList.remove('verberg');
+      } else if (data.error) {
+        alert('Fout tijdens verwerking: ' + data.error);
+        document.getElementById('start-knop').disabled = false;
+      }
+    }
+  } catch (e) {
+    console.error('Polling fout:', e);
+  }
+}
+
+function stopVerwerking() {
+  fetch('/stop', { method: 'POST' });
+  clearInterval(pollingInterval);
+  document.getElementById('stop-knop').classList.add('verberg');
+  document.getElementById('start-knop').disabled = false;
+}
+
+function downloadExcel() {
+  if (huidigOutputBestand) {
+    window.location.href = '/download/' + huidigOutputBestand;
+  }
+}
+
+async function opnieuw() {
+  clearInterval(pollingInterval);
+  await fetch('/reset', { method: 'POST' });
+  location.reload();
+}
+</script>
+</body>
+</html>
+

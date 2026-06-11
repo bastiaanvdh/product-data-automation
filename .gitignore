@@ -1,0 +1,10 @@
+﻿__pycache__/
+*.pyc
+.env
+bron/
+output/
+uploads/
+test_output/
+referentiedata/attribuutset_v4.xlsx
+referentiedata/categorieindeling.xlsx
+referentiedata/merk_domeinen.json
