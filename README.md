@@ -1,61 +1,61 @@
-# Product Data Automation
+# Product Data Automatisering
 
-A Flask web application that automates the creation of product import files for ERP systems. Given a simple spreadsheet with basic product info, it generates a complete, ready-to-import Excel file with AI-written content, scraped supplier data, processed product images, and technical document links.
+Een Flask webapplicatie die het aanmaken van productimportbestanden voor ERP-systemen automatiseert. Op basis van een eenvoudige spreadsheet met basisproductinformatie genereert de tool een compleet, importklaar Excel-bestand met AI-geschreven content, gescrapede leveranciersdata, verwerkte productafbeeldingen en links naar technische documenten.
 
-Built to eliminate the repetitive manual work of creating new product listings — what used to take 30–60 minutes per product now takes seconds.
-
----
-
-## What it does
-
-Upload a spreadsheet with `Article number`, `Description`, `Brand`, and optionally a supplier URL. The tool handles the rest:
-
-1. **Scrapes the supplier page** — extracts product text, finds PIB/VIB technical PDF links
-2. **Downloads and stores PDFs** — saves to the correct network folder structure automatically
-3. **Downloads product images** — filters out logos and lifestyle photos using filename/alt-text matching, scales to exactly 1600×1600 px with white-background padding (up- and downscaling), saves to NAS
-4. **Generates content via OpenAI (gpt-4o-mini)** — web title, invoice title, URL slug, meta title (≤70 chars), meta description (≤160 chars), full HTML product description (~300 words)
-5. **Classifies the product** — selects the right attribute set and category IDs from reference files
-6. **Outputs a complete import Excel** — 42 columns matching the exact ERP import format, color-coded by confidence and data source
+Gebouwd om het repetitieve handmatige werk bij het aanmaken van nieuwe productlijsten te elimineren — wat vroeger 30 tot 60 minuten per product kostte, duurt nu enkele seconden.
 
 ---
 
-## Tech stack
+## Wat het doet
+
+Upload een spreadsheet met artikelnummer, omschrijving, merk en optioneel een leveranciers-URL. De tool regelt de rest:
+
+1. **Scrapet de leverancierspagina** — haalt producttekst op en zoekt links naar technische PDF-documenten (PIB/VIB)
+2. **Downloadt en slaat PDF's op** — weggeschreven naar de juiste mappenstructuur op het netwerk
+3. **Downloadt productafbeeldingen** — filtert logo's en sfeerfoto's op basis van bestandsnaam en alt-tekst, schaalt naar exact 1600×1600 px met witte achtergrond (zowel omhoog als omlaag), slaat op op de NAS
+4. **Genereert content via OpenAI (gpt-4o-mini)** — webtitel, factuurnaam, URL-slug, metatitel (max 70 tekens), metabeschrijving (max 160 tekens), volledige HTML-productomschrijving (~300 woorden)
+5. **Classificeert het product** — selecteert het juiste attribuutset-code en categorie-ID's uit referentiebestanden
+6. **Genereert een complete import-Excel** — 42 kolommen in het exacte ERP-importformaat, kleurgecodeerd op betrouwbaarheid en databron
+
+---
+
+## Technische stack
 
 | | |
 |---|---|
 | **Backend** | Python, Flask |
 | **Scraping** | httpx, BeautifulSoup4 |
 | **AI** | OpenAI API (gpt-4o-mini) |
-| **Image processing** | Pillow |
-| **Excel I/O** | openpyxl, pandas |
+| **Beeldverwerking** | Pillow |
+| **Excel** | openpyxl, pandas |
 | **Concurrency** | ThreadPoolExecutor |
 
 ---
 
-## Key features
+## Belangrijkste kenmerken
 
-- **Test mode** — single config flag redirects all file writes to a local folder; no risk of touching production storage during development
-- **SSL proxy compatibility** — works on corporate networks with intercepting proxies (`httpx verify=False`)
-- **URL fallback for PDFs** — if a supplier URL is provided instead of a local path, the PDF is downloaded automatically; falls back gracefully if the download fails
-- **Image filter** — checks filename and alt text against brand/product keywords (not the full URL, to avoid domain name false positives)
-- **Confidence coloring** — AI classification results are color-coded green/yellow/red based on confidence score
-- **Progress polling** — long-running jobs stream status back to the UI; no page refreshes needed
+- **Testmodus** — één config-vlag stuurt alle bestandsschrijfacties naar een lokale map; geen risico op aanpassen van productiedata tijdens ontwikkeling
+- **SSL-proxy compatibiliteit** — werkt op bedrijfsnetwerken met onderscheppende proxies (`httpx verify=False`)
+- **URL-fallback voor PDF's** — als een leveranciers-URL wordt meegegeven in plaats van een lokaal pad, downloadt de tool de PDF automatisch; valt graceful terug als de download mislukt
+- **Afbeeldingsfilter** — controleert bestandsnaam en alt-tekst op merk- en productnaam (niet de volledige URL, om false positives op domeinnamen te voorkomen)
+- **Betrouwbaarheidskleur** — AI-classificatieresultaten worden groen/geel/rood gekleurd op basis van de confidence score
+- **Voortgangspolling** — langlopende taken streamen hun status terug naar de UI; geen pagina-verversingen nodig
 
 ---
 
-## Setup
+## Installatie
 
 ```bash
 pip install flask httpx beautifulsoup4 openai openpyxl pandas pillow
 ```
 
-Set your OpenAI API key:
+Stel je OpenAI API-sleutel in:
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-Place reference files (attribute set + category tree) in `referentiedata/` or configure network paths in `config.py`.
+Plaats de referentiebestanden (attribuutset en categoriestructuur) in `referentiedata/` of configureer de netwerkpaden in `config.py`.
 
 ```bash
 python app.py
@@ -64,31 +64,31 @@ python app.py
 
 ---
 
-## Project structure
+## Projectstructuur
 
 ```
-├── app.py                    # Flask routes
-├── nieuw_product_generator.py  # Core logic: scraping, AI, image processing, Excel output
-├── config.py                 # Paths, API settings, test mode flag
+├── app.py                        # Flask routes
+├── nieuw_product_generator.py    # Kernlogica: scraping, AI, beeldverwerking, Excel-output
+├── config.py                     # Paden, API-instellingen, testmodus-vlag
 ├── templates/
-│   └── index.html            # Upload UI + progress view
+│   └── index.html                # Upload-UI en voortgangsweergave
 └── referentiedata/
-    ├── attribuutset_v4.xlsx  # Product attribute reference
-    ├── categorieindeling.xlsx  # Category tree reference
-    └── merk_domeinen.json    # Brand → domain mapping (manually maintained)
+    ├── attribuutset_v4.xlsx      # Productattribuut-referentie
+    ├── categorieindeling.xlsx    # Categoriestructuur-referentie
+    └── merk_domeinen.json        # Merk-naar-domein mapping (handmatig bijgehouden)
 ```
 
 ---
 
 ## Output
 
-The generated Excel contains 42 columns in the exact format required for ERP import:
+De gegenereerde Excel bevat 42 kolommen in het exacte formaat voor ERP-import:
 
-| Column group | Source |
+| Kolomgroep | Bron |
 |---|---|
-| Fixed values (active, shop, brand) | Hardcoded config |
-| Language codes (title, slug, meta, HTML description) | OpenAI |
-| Attribute set + category IDs | OpenAI + reference files |
-| Image paths (main + up to 5 extras) | Scraped + processed |
-| Technical document paths (PIB/VIB) | Scraped or manually provided |
-| Commercial fields (price, EAN) | Passed through from input |
+| Vaste waarden (actief, shop, merk) | Config |
+| Taalcodes (titel, slug, meta, HTML-omschrijving) | OpenAI |
+| Attribuutset + categorie-ID's | OpenAI + referentiebestanden |
+| Afbeeldingspaden (hoofd + max 5 extra's) | Gescraped + verwerkt |
+| Technische documentpaden (PIB/VIB) | Gescraped of handmatig meegegeven |
+| Commerciële velden (prijs, EAN) | Doorgegeven vanuit invoer |
