@@ -62,6 +62,8 @@
   .btn-primair:hover { background: #00A3A1; }
   .btn-stop { background: #DC2626; color: #fff; }
   .btn-download { background: #059669; color: #fff; }
+  .btn-king { background: #7C3AED; color: #fff; }
+  .btn-king:hover { background: #6D28D9; }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
   .progress-balk {
@@ -90,66 +92,71 @@
 <body>
 
 <header>
-  <span class="logo">ERP</span>
-  <span class="titel">Product Import Generator – KING ERP</span>
+  <span class="logo">FOV</span>
+  <span class="titel">Product Import Generator</span>
 </header>
 
 <main>
 
-  <!-- REF STATUS -->
-  <div class="kaart">
-    <h2>Referentiedata status</h2>
-    <div class="grid-2">
-      <div>
-        <span class="badge {{ 'badge-ok' if attrib_ok else 'badge-mis' }}">
-          {{ '✓' if attrib_ok else '✗' }} Attribuutset V4
-        </span>
-        <p class="ref-paden">{{ attrib_pad }}</p>
-      </div>
-      <div>
-        <span class="badge {{ 'badge-ok' if cat_ok else 'badge-mis' }}">
-          {{ '✓' if cat_ok else '✗' }} Categorieindeling
-        </span>
-        <p class="ref-paden">{{ cat_pad }}</p>
-      </div>
-    </div>
+  <!-- REF STATUS (compact) -->
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+    <span class="badge {{ 'badge-ok' if attrib_ok else 'badge-mis' }}">
+      {{ '✓' if attrib_ok else '✗' }} Attribuutset V4
+    </span>
+    <span class="badge {{ 'badge-ok' if cat_ok else 'badge-mis' }}">
+      {{ '✓' if cat_ok else '✗' }} Categorieindeling
+    </span>
     {% if not attrib_ok or not cat_ok %}
-    <p style="color:#B45309;font-size:12px;margin-top:10px;">
-      ⚠ Ontbrekende referentiebestanden: kopieer ze naar de <strong>referentiedata/</strong> map.
-      De generator werkt ook zonder, maar confidence zal laag zijn.
-    </p>
+    <span style="font-size:11px;color:#B45309;">Ontbrekende referentiebestanden — kopieer naar <strong>referentiedata/</strong></span>
     {% endif %}
   </div>
 
   <!-- STAP 1: UPLOAD -->
   <div class="kaart">
-    <h2><span class="stap-nummer">1</span> Invoerbestand uploaden</h2>
+    <h2><span class="stap-nummer">1</span> Invoerbestand</h2>
     <label>Excel of CSV met producten (verplicht: Artikelnummer, Omschrijving, Merk)</label>
-    <div style="margin-bottom:10px;">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
       <a href="/template" class="btn" style="background:#E5E7EB;color:#374151;font-size:12px;padding:6px 14px;text-decoration:none;">
         ⬇ Download invultemplate
       </a>
+      <span style="font-size:12px;color:#9CA3AF;">of</span>
+      <a href="/formulier" class="btn" style="background:#F0FDFA;color:#00A3A1;border:1px solid #00A3A1;font-size:12px;padding:6px 14px;text-decoration:none;font-weight:bold;">
+        Formulier invullen →
+      </a>
     </div>
     <input type="file" id="invoer-bestand" accept=".xlsx,.xls,.csv">
-    <div style="margin-top: 12px;">
+    <div style="margin-top:12px;">
       <button class="btn btn-primair" onclick="uploadBestand()">Bestand laden</button>
       <span id="upload-status" style="font-size:13px;margin-left:12px;"></span>
     </div>
     <div id="preview-sectie" class="verberg">
       <table class="preview-tabel" id="preview-tabel"></table>
     </div>
+    <div id="groepen-sectie" class="verberg" style="margin-top:14px;">
+      <div id="groepen-box"></div>
+    </div>
   </div>
 
   <!-- STAP 2: INSTELLINGEN -->
   <div class="kaart">
     <h2><span class="stap-nummer">2</span> Instellingen</h2>
-    <div style="max-width: 300px;">
-      <label>Model</label>
+    <div style="max-width:300px;">
+      <label>AI-model <span style="font-weight:normal;color:#9CA3AF;">(korte tekstvelden — HTML gebruikt altijd gpt-4o)</span></label>
       <select id="model">
-        <option value="gpt-4o-mini" selected>gpt-4o-mini (snel &amp; goedkoop)</option>
-        <option value="gpt-4o">gpt-4o (beter, langzamer)</option>
+        <option value="gpt-4o-mini" selected>gpt-4o-mini (snel, aanbevolen)</option>
+        <option value="gpt-4o">gpt-4o (langzamer)</option>
       </select>
     </div>
+    <div style="margin-top:16px;padding:12px 14px;border-left:3px solid #30b7be;background:#F0FDFA;border-radius:0 6px 6px 0;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:bold;margin-bottom:0;">
+        <input type="checkbox" id="genereer-jl" style="width:auto;accent-color:#30b7be;">
+        Jachtlakken.nl taalcodes (2N1 / 2N2 / 2NF / 2NT / 2NH / 2NL)
+      </label>
+      <p style="font-size:11px;color:#6B7280;margin-top:5px;margin-left:22px;margin-bottom:0;">
+        Optioneel. B2C-teksten voor Jachtlakken.nl op basis van de FOV NL-inhoud. Voegt ~2 extra API-calls per product toe.
+      </p>
+    </div>
+    <p style="font-size:11px;color:#9CA3AF;margin-top:10px;">FOV NL + DE taalcodes worden altijd gegenereerd.</p>
   </div>
 
   <!-- STAP 3: VERWERKEN -->
@@ -170,13 +177,37 @@
       <div id="log-box"></div>
     </div>
 
-    <div id="download-sectie" class="verberg" style="margin-top:16px;">
-      <button class="btn btn-download" id="download-knop" onclick="downloadExcel()">
-        ⬇ Download KING Import Excel
-      </button>
-      <button class="btn" style="background:#E5E7EB;margin-left:10px;" onclick="opnieuw()">
-        Opnieuw starten
-      </button>
+    <div id="download-sectie" class="verberg" style="margin-top:16px;border-top:1px solid #E5E7EB;padding-top:16px;">
+      <!-- Primaire acties -->
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <button class="btn btn-download" id="download-knop" onclick="downloadExcel()">
+          ⬇ Download KING Import Excel
+        </button>
+        <button class="btn btn-king" id="push-knop" onclick="startPush(false)">
+          ▲ Push naar KING
+        </button>
+        <span id="king-config-badge" style="font-size:11px;"></span>
+      </div>
+      <!-- Secundaire acties -->
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
+        <button class="btn" id="dryrun-knop" style="background:#EDE9FE;color:#7C3AED;font-size:12px;padding:7px 14px;" onclick="startPush(true)">
+          Dry-run testen
+        </button>
+        <button class="btn" style="background:#E5E7EB;color:#374151;font-size:12px;padding:7px 14px;" onclick="opnieuw()">
+          Opnieuw starten
+        </button>
+        <a href="/push-geschiedenis-html" style="font-size:12px;color:#7C3AED;text-decoration:none;margin-left:4px;">
+          Push-geschiedenis →
+        </a>
+      </div>
+    </div>
+
+    <!-- Push voortgang -->
+    <div id="push-sectie" class="verberg" style="margin-top:16px;border-top:1px solid #E5E7EB;padding-top:14px;">
+      <div class="progress-balk"><div class="progress-vulling" id="push-balk" style="width:0%;background:#7C3AED"></div></div>
+      <span class="progress-tekst" id="push-tekst">0 / 0</span>
+      <div id="push-log-box" style="background:#1F0A3C;color:#C4B5FD;font-family:'Courier New',monospace;font-size:11px;padding:12px;border-radius:5px;height:160px;overflow-y:auto;margin-top:8px;"></div>
+      <div id="push-resultaat" class="verberg" style="margin-top:10px;font-size:13px;font-weight:bold;"></div>
     </div>
   </div>
 
@@ -210,11 +241,36 @@ async function uploadBestand() {
     status.style.color = '#059669';
 
     toonPreview(data.preview);
+    toonGroepen(data);
     document.getElementById('start-knop').disabled = false;
   } catch (e) {
     status.textContent = '✗ Upload mislukt: ' + e;
     status.style.color = '#DC2626';
   }
+}
+
+function toonGroepen(data) {
+  const sectie = document.getElementById('groepen-sectie');
+  if (!sectie) return;
+  if (!data.groepen || data.groepen.length === 0) {
+    sectie.classList.add('verberg'); return;
+  }
+  const box = document.getElementById('groepen-box');
+  let html = `<p style="font-size:13px;margin-bottom:10px;">
+    <strong>${data.groepen.length} variantengroep(en) gedetecteerd</strong>
+    &nbsp;·&nbsp; ${data.n_parent} parent(s) &nbsp;·&nbsp; ${data.n_child} children &nbsp;·&nbsp; ${data.n_los} losse artikel(en)
+  </p>`;
+  data.groepen.forEach(g => {
+    html += `<div style="margin-bottom:8px;padding:8px 12px;background:#F0FDF4;border:1px solid #86EFAC;border-radius:6px;font-size:12px;">
+      <strong style="color:#002B5C;">${g.parent_nr}</strong>
+      <span style="color:#6B7280;margin-left:6px;">${g.parent_oms}</span>
+      <div style="margin-top:4px;color:#374151;">
+        ${g.children.map(c => `<span style="margin-right:12px;">↳ ${c.nr} <em>${c.oms}</em></span>`).join('')}
+      </div>
+    </div>`;
+  });
+  box.innerHTML = html;
+  sectie.classList.remove('verberg');
 }
 
 function toonPreview(preview) {
@@ -232,7 +288,8 @@ function toonPreview(preview) {
 
 // ── Start ──
 async function startVerwerking() {
-  const model = document.getElementById('model').value;
+  const model      = document.getElementById('model').value;
+  const genereerJl = document.getElementById('genereer-jl').checked;
 
   document.getElementById('start-knop').disabled = true;
   document.getElementById('stop-knop').classList.remove('verberg');
@@ -243,7 +300,7 @@ async function startVerwerking() {
   const resp = await fetch('/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: model }),
+    body: JSON.stringify({ model: model, genereer_de: true, genereer_jl: genereerJl }),
   });
   const data = await resp.json();
   if (!data.ok) {
@@ -305,6 +362,113 @@ async function opnieuw() {
   await fetch('/reset', { method: 'POST' });
   location.reload();
 }
+
+// ── KING Push ──
+let pushPolling = null;
+
+async function controleerKingConfig() {
+  try {
+    const resp = await fetch('/push-config');
+    const data = await resp.json();
+    const badge = document.getElementById('king-config-badge');
+    const knop  = document.getElementById('push-knop');
+    if (data.configured) {
+      badge.innerHTML = `<span style="color:#059669;">✓ KING: ${data.administratie}@${data.host}</span>`;
+      knop.disabled = false;
+    } else {
+      badge.innerHTML = '<span style="color:#9CA3AF;">KING niet geconfigureerd (env-vars)</span>';
+      knop.disabled = true;
+    }
+  } catch (e) {
+    document.getElementById('push-knop').disabled = true;
+  }
+}
+
+async function startPush(dryRun) {
+  const label = dryRun ? 'Dry-run uitvoeren' : 'Push naar KING';
+  const bevestiging = dryRun
+    ? 'Dry-run starten?\nPayloads worden opgebouwd en gelogd — niets wordt naar KING verstuurd.'
+    : 'Alle gegenereerde producten naar KING pushen?\nDit maakt nieuwe artikelen aan of werkt bestaande bij.';
+  if (!confirm(bevestiging)) return;
+
+  document.getElementById('push-knop').disabled = true;
+  document.getElementById('dryrun-knop').disabled = true;
+  document.getElementById('push-sectie').classList.remove('verberg');
+  document.getElementById('push-resultaat').classList.add('verberg');
+  document.getElementById('push-log-box').innerHTML = '';
+
+  const resp = await fetch('/push', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dry_run: dryRun }),
+  });
+  const data = await resp.json();
+  if (!data.ok) {
+    alert('Push kon niet starten: ' + data.error);
+    document.getElementById('push-knop').disabled = false;
+    document.getElementById('dryrun-knop').disabled = false;
+    return;
+  }
+
+  pushPolling = setInterval(peilPushVoortgang, 1500);
+}
+
+async function peilPushVoortgang() {
+  try {
+    const resp = await fetch('/push-status');
+    const data = await resp.json();
+
+    const pct = data.total > 0 ? Math.round((data.current / data.total) * 100) : 0;
+    document.getElementById('push-balk').style.width = pct + '%';
+    document.getElementById('push-tekst').textContent = `${data.current} / ${data.total} artikelen`;
+
+    const logBox = document.getElementById('push-log-box');
+    logBox.innerHTML = data.log.map(l =>
+      `<div class="log-${l.type}">[${l.time}] ${l.msg}</div>`
+    ).join('');
+    logBox.scrollTop = logBox.scrollHeight;
+
+    if (data.done) {
+      clearInterval(pushPolling);
+      document.getElementById('push-knop').disabled = false;
+      document.getElementById('dryrun-knop').disabled = false;
+
+      const res = document.getElementById('push-resultaat');
+      res.classList.remove('verberg');
+      if (data.error) {
+        res.style.color = '#DC2626';
+        res.textContent = 'Fout: ' + data.error;
+      } else {
+        const kleur = data.n_mislukt === 0 ? '#059669' : '#D97706';
+        res.style.color = kleur;
+        res.innerHTML = `Push klaar — ${data.n_gelukt} gelukt, ${data.n_mislukt} met fouten
+          &nbsp;·&nbsp; <a href="/push-geschiedenis-html" style="color:#7C3AED;">Bekijk geschiedenis</a>`;
+      }
+    }
+  } catch (e) {
+    console.error('Push polling fout:', e);
+  }
+}
+
+// Controleer KING config zodra download-sectie zichtbaar wordt
+document.addEventListener('DOMContentLoaded', () => {
+  const observer = new MutationObserver(() => {
+    if (!document.getElementById('download-sectie').classList.contains('verberg')) {
+      controleerKingConfig();
+    }
+  });
+  const el = document.getElementById('download-sectie');
+  if (el) observer.observe(el, { attributes: true, attributeFilter: ['class'] });
+
+  // Formulier redirect: auto-start generatie als ?gestart=1
+  if (new URLSearchParams(window.location.search).get('gestart') === '1') {
+    document.getElementById('start-knop').disabled = false;
+    document.getElementById('voortgang-sectie').classList.remove('verberg');
+    startVerwerking();
+    // URL opschonen zonder pagina reload
+    history.replaceState(null, '', '/');
+  }
+});
 </script>
 </body>
 </html>

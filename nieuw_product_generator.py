@@ -18,6 +18,18 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+import pypdf
+
+try:
+    from ddgs import DDGS as _DDGS
+    _DDG_BESCHIKBAAR = True
+except ImportError:
+    try:
+        from duckduckgo_search import DDGS as _DDGS
+        _DDG_BESCHIKBAAR = True
+    except ImportError:
+        _DDG_BESCHIKBAAR = False
+
 import httpx
 import openpyxl
 import pandas as pd
@@ -28,6 +40,55 @@ from openai import OpenAI
 from PIL import Image
 
 import config
+from de_taalcodes import genereer_de_taalcodes, DE_KOLOMMEN, DE_VELDEN
+from jl_taalcodes import genereer_jl_taalcodes, JL_KOLOMMEN, JL_VELDEN
+
+# ─────────────────────────────────────────────
+#  MERKDOMEINEN
+# ─────────────────────────────────────────────
+
+def laad_merk_domeinen(pad: Path) -> dict:
+    """Laad merk → domein mapping uit JSON. Keys worden lowercase opgeslagen."""
+    if not pad or not pad.exists():
+        return {}
+    try:
+        with open(pad, encoding="utf-8") as f:
+            data = json.load(f)
+        return {k.lower().strip(): v.strip() for k, v in data.items()
+                if not k.startswith("_") and v and isinstance(v, str)}
+    except Exception:
+        return {}
+
+
+def zoek_leverancier_url(merk: str, omschrijving: str, merk_domeinen: dict) -> str:
+    """
+    Zoekt de productpagina op het leveranciersdomein via DDG site:-zoekopdracht.
+    Retourneert de beste URL of "" als niets bruikbaars gevonden.
+    """
+    if not _DDG_BESCHIKBAAR or not merk_domeinen:
+        return ""
+
+    domein = merk_domeinen.get(merk.lower().strip(), "")
+    if not domein:
+        return ""
+
+    # Strip maat/inhoud voor schonere query (bijv. "Sikaflex-291 600ml" → "Sikaflex-291")
+    omschr_zoek = _strip_variant_suffix(omschrijving).strip()
+    query = f"site:{domein} {omschr_zoek}"
+
+    try:
+        with _DDGS(verify=False) as ddg:
+            resultaten = ddg.text(query, max_results=5)
+    except Exception:
+        return ""
+
+    for r in resultaten:
+        url = r.get("href", "")
+        if url and domein in url.lower():
+            return url
+
+    return ""
+
 
 # Doelmap productafbeeldingen — NAS in productie, lokale testmap in testmodus
 AFBEELDING_BASE_DIR = (
@@ -155,6 +216,112 @@ def _download_afbeeldingen(soup: BeautifulSoup, base_url: str,
     return paden
 
 
+def _kandidaat_bytes_van_pagina(
+    page_url: str,
+    zoekwoorden: list[str],
+) -> tuple[bytes, str] | None:
+    """
+    Haalt de eerste passende productafbeelding op van een pagina als raw bytes.
+    Slaat niets op schijf op. Retourneert (bytes, img_url) of None.
+    """
+    try:
+        resp = httpx.get(page_url, timeout=15, follow_redirects=True,
+                         verify=False, headers=_HEADERS)
+        resp.raise_for_status()
+    except Exception:
+        return None
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    gezien: set[str] = set()
+
+    for img in soup.find_all("img"):
+        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or ""
+        if not src:
+            continue
+        full = urljoin(page_url, src)
+        if full in gezien:
+            continue
+        gezien.add(full)
+        if any(x in full.lower() for x in [".svg", ".gif", "data:"]):
+            continue
+        bestandsnaam = Path(urlparse(full).path).name
+        alt = img.get("alt", "")
+        combined = re.sub(r"[^a-z0-9]", "", (bestandsnaam + " " + alt).lower())
+        if not any(w in combined for w in zoekwoorden):
+            continue
+        try:
+            r = httpx.get(full, timeout=15, follow_redirects=True,
+                          verify=False, headers=_HEADERS)
+            r.raise_for_status()
+            img_obj = Image.open(io.BytesIO(r.content))
+            if img_obj.width < AFBEELDING_MIN_PX or img_obj.height < AFBEELDING_MIN_PX:
+                continue
+            return r.content, full
+        except Exception:
+            continue
+
+    return None
+
+
+def _beoordeel_afbeeldingen_vision(
+    kandidaten: list[dict],
+    client,
+    omschrijving: str,
+) -> int:
+    """
+    Vraagt GPT-4o Vision welke kandidaat het beste productfoto is.
+    Retourneert 0-based index van de beste kandidaat, of 0 als fallback.
+    """
+    if len(kandidaten) <= 1:
+        return 0
+
+    import base64
+
+    inhoud: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                f"Je beoordeelt {len(kandidaten)} productfoto-kandidaten voor: {omschrijving}.\n"
+                "Welke afbeelding toont het meest duidelijk het product zelf (bijv. een verfblik, tube "
+                "of verpakking) op een witte of neutrale achtergrond — zonder kleurvlak, zonder "
+                "moodboard/lifestyle-foto, en scherp genoeg?\n"
+                f"Antwoord met ALLEEN een getal (1 t/m {len(kandidaten)}), "
+                "of 0 als geen enkele geschikt is als hoofdproductfoto."
+            )
+        }
+    ]
+
+    for i, k in enumerate(kandidaten, 1):
+        try:
+            b64 = base64.b64encode(k["bytes"]).decode()
+            img = Image.open(io.BytesIO(k["bytes"]))
+            fmt = (img.format or "JPEG").lower()
+            mime = f"image/{'jpeg' if fmt in ('jpg', 'jpeg') else fmt}"
+            inhoud.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "low"}
+            })
+        except Exception:
+            inhoud.append({"type": "text", "text": f"[Afbeelding {i}: niet laadbaar]"})
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            max_tokens=5,
+            messages=[{"role": "user", "content": inhoud}]
+        )
+        antwoord = response.choices[0].message.content.strip()
+        match = re.search(r"\d+", antwoord)
+        if not match:
+            return 0
+        gekozen = int(match.group())
+        if gekozen == 0 or gekozen > len(kandidaten):
+            return 0
+        return gekozen - 1
+    except Exception:
+        return 0
+
+
 def haal_leverancier_pagina(url: str, merk: str = "", omschrijving: str = "") -> dict:
     """
     Haalt leverancierspagina op en retourneert:
@@ -219,11 +386,191 @@ def haal_leverancier_pagina(url: str, merk: str = "", omschrijving: str = "") ->
     return {"tekst": tekst, "pib_pad": pib_pad, "vib_pad": vib_pad, "afbeeldingen": afbeeldingen}
 
 # ─────────────────────────────────────────────
+#  VARIANT-GROEP DETECTIE
+# ─────────────────────────────────────────────
+
+# Variant-suffixen die aan het einde van een omschrijving kunnen staan
+_VARIANT_RE = re.compile(
+    r"""
+    \s*
+    \d+[\.,]?\d*          # getal (bijv. 5, 0.5, 2,5)
+    \s*
+    (?:
+        kg|g|gram|
+        liter|ltr|l|ml|cl|
+        stuks?|stk|st\b|
+        m2|m²|m\b|cm|mm|
+        pak|blik|bus|emmer|set|doos|rol|tube|fles|spuit|can|
+        x\d+              # bijv. 2x500ml
+    )
+    \b
+    (?:\s+\d+[\.,]?\d*\s*(?:kg|g|liter|l|ml|stuks?|stk|pak|blik|bus|emmer|set|doos|rol))?
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+def _strip_variant_suffix(omschrijving: str) -> str:
+    """Geeft de basisnaam terug zonder maat/inhoud/stuks aan het einde."""
+    return _VARIANT_RE.sub("", omschrijving).strip().rstrip(",-").strip()
+
+
+def _gemeenschappelijk_prefix(strings: list[str]) -> str:
+    """Langste gemeenschappelijke prefix (karakter-niveau) van een lijst strings."""
+    if not strings:
+        return ""
+    prefix = strings[0]
+    for s in strings[1:]:
+        while not s.startswith(prefix):
+            prefix = prefix[:-1]
+            if not prefix:
+                return ""
+    return prefix
+
+
+def _gemeenschappelijk_prefix_woorden(beschrijvingen: list[str]) -> str:
+    """Langste gemeenschappelijke prefix op woordniveau (case-insensitief)."""
+    if not beschrijvingen:
+        return ""
+    woorden = [b.lower().split() for b in beschrijvingen]
+    gemeenschappelijk = []
+    for i in range(min(len(w) for w in woorden)):
+        if all(w[i] == woorden[0][i] for w in woorden):
+            gemeenschappelijk.append(woorden[0][i])
+        else:
+            break
+    # Herstel originele schrijfwijze van het eerste artikel
+    origineel = beschrijvingen[0].split()
+    return " ".join(origineel[:len(gemeenschappelijk)])
+
+
+def _bouw_groep(leden: list[dict], groep_id: int) -> list[dict]:
+    """Maakt parent + children voor een groep varianten."""
+    artnrs    = [str(p.get("Artikelnummer", "")) for p in leden]
+    prefix    = _gemeenschappelijk_prefix(artnrs)
+    prefix    = re.sub(r'\d+$', '', prefix)   # strip losse cijfers aan het einde (bijv. "5630BNA03" → "5630BNA")
+    parent_nr = f"{prefix}0000WEB" if prefix else f"WEBGRP{groep_id:04d}"
+
+    omschrijvingen = [str(p.get("Omschrijving", "")) for p in leden]
+    basisnaam      = _gemeenschappelijk_prefix_woorden(omschrijvingen).strip()
+    if not basisnaam:
+        basisnaam = _strip_variant_suffix(omschrijvingen[0])
+
+    # Bepaal configuratie-dimensies:
+    # Zijn er variaties in de basis-omschrijving (na stripping van maat)?
+    bases_gestript = [_strip_variant_suffix(o).lower() for o in omschrijvingen]
+    heeft_type_var = len(set(bases_gestript)) > 1
+    heeft_maat_var = any(_VARIANT_RE.search(o) for o in omschrijvingen)
+
+    if heeft_type_var and heeft_maat_var:
+        config_op = "Type,Inhoud"
+    elif heeft_type_var:
+        config_op = "Type"
+    else:
+        config_op = "Inhoud"
+
+    eerste     = leden[0]
+    parent_rij = {
+        **{k: v for k, v in eerste.items()
+           if k not in ("Artikelnummer", "Omschrijving", "Eenheid", "EanCode")},
+        "Artikelnummer":    parent_nr,
+        "Omschrijving":     basisnaam,
+        "Eenheid":          "",
+        "EanCode":          "",
+        "_type":            "parent",
+        "_configuratie_op": config_op,
+        "_groep_id":        groep_id,
+    }
+    rijen = [parent_rij]
+    for p in leden:
+        rijen.append({
+            **p,
+            "_type":            "child",
+            "_parent_code":     parent_nr,
+            "_configuratie_op": config_op,
+            "_groep_id":        groep_id,
+        })
+    return rijen
+
+
+def detecteer_variantgroepen(producten: list[dict]) -> list[dict]:
+    """
+    Groepeert producten die varianten zijn van hetzelfde product.
+
+    Twee passes:
+      1. Groepeer op exacte basisnaam na afstropen van maat/inhoud-suffixen.
+         → vangt "Anti-Skid Coarse 3kg" + "Anti-Skid Coarse 25kg"
+      2. Merge groepen waarvan de basisnamen een gemeenschappelijk woordprefix
+         delen van ≥ 3 woorden.
+         → vangt "Anti-Skid Coarse" + "Anti-Skid Medium" + "Anti-Skid Fine"
+    """
+    from collections import defaultdict
+
+    al_gemarkeerd = [p for p in producten if p.get("_type")]
+    te_analyseren  = [p for p in producten if not p.get("_type")]
+
+    # ── Pass 1: groepeer op exacte gestripte basisnaam ──────────────────────
+    basis_groepen: dict[str, list[dict]] = defaultdict(list)
+    for p in te_analyseren:
+        basis = _strip_variant_suffix(str(p.get("Omschrijving", ""))).lower().strip()
+        basis_groepen[basis].append(p)
+
+    # ── Pass 2: merge groepen met ≥ 3 gemeenschappelijke woorden ────────────
+    # Bouw union-find structuur
+    bases   = list(basis_groepen.keys())
+    ouder   = {b: b for b in bases}   # union-find
+
+    def vind(x):
+        while ouder[x] != x:
+            ouder[x] = ouder[ouder[x]]
+            x = ouder[x]
+        return x
+
+    def unie(a, b):
+        ra, rb = vind(a), vind(b)
+        if ra != rb:
+            # Gebruik de kortste als root (= meest generieke naam)
+            ouder[rb] = ra if len(ra) <= len(rb) else rb
+            if len(rb) < len(ra):
+                ouder[ra] = rb
+
+    for i, basis_a in enumerate(bases):
+        woorden_a = basis_a.split()
+        for basis_b in bases[i + 1:]:
+            woorden_b = basis_b.split()
+            gedeeld = 0
+            for wa, wb in zip(woorden_a, woorden_b):
+                if wa == wb:
+                    gedeeld += 1
+                else:
+                    break
+            if gedeeld >= 3:
+                unie(basis_a, basis_b)
+
+    # Verzamel super-groepen
+    super_groepen: dict[str, list[dict]] = defaultdict(list)
+    for basis, leden in basis_groepen.items():
+        super_groepen[vind(basis)].extend(leden)
+
+    # ── Resultaat opbouwen ───────────────────────────────────────────────────
+    resultaat = list(al_gemarkeerd)
+    groep_id  = 0
+
+    for _, leden in super_groepen.items():
+        if len(leden) < 2:
+            resultaat.extend(leden)
+        else:
+            groep_id += 1
+            resultaat.extend(_bouw_groep(leden, groep_id))
+
+    return resultaat
+
+
+# ─────────────────────────────────────────────
 #  EXCEL KOLOMDEFINITIE (zelfde structuur als FLEX import)
 # ─────────────────────────────────────────────
 
 KOLOMMEN = [
-    # ── Kolommen 1-42: exact FLEX Import structuur ───────────────
+    # ── KING Import kolommen ─────────────────────────────────────
     "Artikelnummer",                        # 1
     "Eenheid",                              # 2
     "Zoekcode",                             # 3  ← Merk
@@ -233,39 +580,31 @@ KOLOMMEN = [
     "TekstOpFactuur",                       # 7  ← Omschrijving (invoer)
     "AfbeeldingKlein",                      # 8
     "AfbeeldingGroot",                      # 9
-    "Leveranciernummer",                    # 10
+    "Leveranciernummer",                    # 10 ← handmatig (oranje)
     "Leveranciernaam",                      # 11 ← Merk
     "ArtikelOmschrijvingLeverancier",       # 12 ← Omschrijving
     "ArtikelNummerBijLeverancier",          # 13
     "EanCode",                              # 14
-    "VR_ART_Magentotype",                   # 15 = "Simpel"
-    "VR_ART_Zichtbaarheid",                 # 16 = "Catalogus, zoeken"
-    "VR_ART_Actief_in_shop",               # 17 = 1
-    "VR_ART_F-Merk",                       # 18 ← Merk
-    "VR_ART_Extra_afbeelding_1",           # 19
-    "VR_ART_Extra_afbeelding_2",           # 20
-    "VR_ART_Extra_afbeelding_3",           # 21
-    "VR_ART_Extra_afbeelding_4",           # 22
-    "VR_ART_Extra_afbeelding_5",           # 23
-    "VR_ART_Productinformatieblad_NL",     # 24
-    "VR_ART_Productveiligheidsblad_NL_A",  # 25
-    "VR_ART_Productveiligheidsblad_NL_B",  # 26
-    "VR_ART_Productveiligheidsblad_NL_C",  # 27
-    "VR_ART_Productveiligheidsblad_ENG_A", # 28
-    "VR_ART_Productveiligheidsblad_ENG_B", # 29
-    "VR_ART_Productveiligheidsblad_ENG_C", # 30
-    "VR_ART_Productveiligheidsblad_DE_A",  # 31
-    "VR_ART_Productveiligheidsblad_DE_B",  # 32
-    "VR_ART_Productveiligheidsblad_DE_C",  # 33
-    "VR_ART_Explosietekening_UNI",         # 34
-    "VR_ART_Producthandleiding_NL",        # 35
-    "VR_ART_Attribuutset_V4",              # 36 ← AI
-    "1NT_FOV_NL_TITLE_WEB",               # 37 ← AI
-    "1NF_FOV_NL_TITLE_FACTUUR",           # 38 ← AI
-    "1NH_FOV_NL_URL",                     # 39 ← AI
-    "1N1_FOV_NL_META_DATA_1",             # 40 ← AI
-    "1N2_FOV_NL_META_DATA_2",             # 41 ← AI
-    "1NL_FOV_NL_LANGE_OMSCHRIJVING",      # 42 ← AI
+    "VR_ART_Magentotype",                   # 15 = "Simpel" / "Configureerbaar"
+    "VR_ART_Zichtbaarheid",                 # 16 = "Catalogus, zoeken" / "Niet individueel zichtbaar"
+    "VR_ART_Virtueel_Artikel_SKU",          # 17 = parent code (child) of eigen code (parent)
+    "VR_ART_Configuratie_op",              # 18 = "Inhoud,Kleur" voor configureerbare producten
+    "VR_ART_Actief_in_shop",               # 19 = 1
+    "VR_ART_F-Merk",                       # 20 ← Merk
+    "VR_ART_Extra_afbeelding_1",           # 21
+    "VR_ART_Extra_afbeelding_2",           # 22
+    "VR_ART_Extra_afbeelding_3",           # 23
+    "VR_ART_Extra_afbeelding_4",           # 24
+    "VR_ART_Extra_afbeelding_5",           # 25
+    "VR_ART_Productinformatieblad_NL",     # 26
+    "VR_ART_Productveiligheidsblad_NL_A",  # 27
+    "VR_ART_Attribuutset_V4",              # 28 ← AI
+    "1NT_FOV_NL_TITLE_WEB",               # 29 ← AI
+    "1NF_FOV_NL_TITLE_FACTUUR",           # 30 ← AI
+    "1NH_FOV_NL_URL",                     # 31 ← AI
+    "1N1_FOV_NL_META_DATA_1",             # 32 ← AI
+    "1N2_FOV_NL_META_DATA_2",             # 33 ← AI
+    "1NL_FOV_NL_LANGE_OMSCHRIJVING",      # 34 ← AI
     # ── Extra controle-kolommen (niet in FLEX, voor review) ──────
     "Attribuutset_Confidence_%",
     "Attribuutset_Label",
@@ -392,11 +731,405 @@ def _compacte_categorie_lijst(categorieen: list[dict]) -> str:
 
 
 # ─────────────────────────────────────────────
+#  PIB / VIB LEZEN
+# ─────────────────────────────────────────────
+
+def _lees_pdf_tekst(pad: Path, max_tekens: int = 6000) -> str:
+    """Extraheert leesbare tekst uit een PDF met pypdf."""
+    try:
+        reader = pypdf.PdfReader(str(pad))
+        tekst_delen = []
+        for pagina in reader.pages:
+            tekst_delen.append(pagina.extract_text() or "")
+            if sum(len(t) for t in tekst_delen) >= max_tekens:
+                break
+        return " ".join(" ".join(tekst_delen).split())[:max_tekens]
+    except Exception:
+        return ""
+
+
+# Merken waarvan de PIB in een andere map staat (bijv. Sigma → PPG).
+_PIB_MERK_ALIAS: dict[str, list[str]] = {
+    "Sigma":       ["PPG"],
+    "Sigmacover":  ["PPG"],
+    "Sigmadur":    ["PPG"],
+    "Sigmaweld":   ["PPG"],
+}
+
+
+def _zoek_pdf(basis_dir: Path, merk: str, omschrijving: str, prefix: str) -> Path | None:
+    """
+    Zoekt een PIB of VIB in {basis_dir}/{Merk}/NL/.
+    prefix = "PIB" of "VIB"
+    Probeert ook alias-mappen (bijv. Sigma → PPG).
+    """
+    merk_clean = _schone_bestandsnaam(merk)
+
+    # Bouw kandidaat-mappen: eigen map + eventuele aliassen
+    kandidaat_mappen: list[tuple[str, Path]] = []
+    eigen_map = basis_dir / merk_clean / "NL"
+    if eigen_map.exists():
+        kandidaat_mappen.append((merk_clean, eigen_map))
+    for alias in _PIB_MERK_ALIAS.get(merk, []):
+        alias_clean = _schone_bestandsnaam(alias)
+        alias_map   = basis_dir / alias_clean / "NL"
+        if alias_map.exists():
+            kandidaat_mappen.append((alias_clean, alias_map))
+
+    if not kandidaat_mappen:
+        return None
+
+    # Exacte slug — strip brand alleen als gevolgd door spatie (niet bij "Sikaflex" → "Sika")
+    omschr = omschrijving.strip()
+    if merk and omschr.lower().startswith(merk.lower() + " "):
+        omschr = omschr[len(merk):].strip()
+    omschr_clean = _schone_bestandsnaam(omschr).strip(" -")
+
+    for folder_merk, map_pad in kandidaat_mappen:
+        exact = map_pad / f"{prefix} {folder_merk} {omschr_clean}-NL.pdf"
+        if exact.exists():
+            return exact
+
+    # Fuzzy: brand + variant-suffixen strippen voor token-extractie.
+    # - brand strip: "International One Up Web" → "One Up Web" (anders: tokens=["international"] → elke International PDF)
+    # - variant strip: RAL-codes en basisaanduidingen staan nooit in PIB-bestandsnamen
+    #   "Jotun Conseal TU RAL 8002 - B3" → "Conseal TU" → tokens=["conseal"]
+    omschr_fuzzy = omschrijving.strip()
+    if merk and omschr_fuzzy.lower().startswith(merk.lower() + " "):
+        omschr_fuzzy = omschr_fuzzy[len(merk):].strip()
+    # Strip kleurcode-systemen: RAL 7043 / RAL5024, JTN 1386, NCS S1234-... etc.
+    omschr_fuzzy = re.sub(r"\s+(?:RAL|JTN|NCS)\s*[-/]?\s*\d+\S*", "", omschr_fuzzy, flags=re.IGNORECASE)
+    # Strip basisaanduidingen: " - B3", "B1" aan het einde
+    omschr_fuzzy = re.sub(r"\s*[-–]?\s*\bB[0-9]\b", "", omschr_fuzzy, flags=re.IGNORECASE)
+    omschr_fuzzy = omschr_fuzzy.strip()
+
+    def _bouw_tokens(tekst: str, min_tekst: int) -> list[str]:
+        tokens = []
+        for d in re.split(r"[\s\-_/®]+", tekst):
+            d_lower = d.lower().strip("()[].")
+            if not d_lower:
+                continue
+            if d_lower.isdigit() and len(d_lower) >= 2:
+                tokens.append(d_lower)
+            elif len(d_lower) >= min_tekst:
+                tokens.append(d_lower)
+        return tokens
+
+    def _beste_match(kandidaten: list[Path]) -> Path | None:
+        if not kandidaten:
+            return None
+        # Kortste naam = basisproduct; voorkomt dat een variant-PIB ("Flexi Alu") wint van de basis ("Flexi")
+        return min(kandidaten, key=lambda p: len(p.name))
+
+    # Pass 1: alle woorden ≥3 chars
+    woorden = _bouw_tokens(omschr_fuzzy, 3)
+    if woorden:
+        for _, map_pad in kandidaat_mappen:
+            matches = [k for k in map_pad.glob("*NL.pdf")
+                       if all(w in k.name.lower() for w in woorden)]
+            if matches:
+                return _beste_match(matches)
+
+    # Pass 2: alleen lange woorden (≥7 chars) + cijfers — filtert kleurcodesuffixen ("Yellow", "Green", "Set") weg.
+    # "Sigmacover 280 Yellow/Green Set" → pass1: ["sigmacover","280","yellow","green","set"] → geen match
+    # → pass2: ["sigmacover","280"] → matcht "PIB PPG Sigmacover 280-NL.pdf" ✓
+    woorden_lang = _bouw_tokens(omschr_fuzzy, 7)
+    if woorden_lang and woorden_lang != woorden:
+        for _, map_pad in kandidaat_mappen:
+            matches = [k for k in map_pad.glob("*NL.pdf")
+                       if all(w in k.name.lower() for w in woorden_lang)]
+            if matches:
+                return _beste_match(matches)
+
+    return None
+
+
+def laad_zoekwoorden(pad: Path) -> list[dict]:
+    if not pad or not pad.exists():
+        return []
+    import csv
+    with open(pad, encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f, delimiter=";"))
+
+
+_STOPWOORDEN = {"voor", "van", "met", "het", "een", "and", "the", "pro", "plus",
+                "super", "ultra", "new", "all", "one", "max", "base", "top"}
+
+def zoek_relevante_keywords(product: dict, zoekwoorden: list[dict], max_n: int = 6) -> list[str]:
+    if not zoekwoorden:
+        return []
+    omschrijving = product.get("Omschrijving", "").lower()
+    # Betekenisvolle woorden uit productnaam (≥4 chars, geen cijfers, geen stopwoorden)
+    # Brand wordt NIET meegenomen — te generiek (brand matcht ook andere producttypes)
+    woorden = [w for w in re.split(r"[\s\-/]+", omschrijving)
+               if len(w) >= 4 and not w.isdigit() and w not in _STOPWOORDEN]
+
+    resultaten = []
+    for rij in zoekwoorden:
+        doel = rij.get("doel_zoekwoord", "").lower()
+        if not doel:
+            continue
+        doel_woorden = set(re.split(r"[\s\-/]+", doel))
+        if any(w in doel_woorden for w in woorden):
+            try:
+                vol = int(rij.get("ads_zoekvolume") or 0)
+            except ValueError:
+                vol = 0
+            resultaten.append((vol, doel))
+
+    # Deduplicate, sorteer op volume
+    gezien = set()
+    uniek = []
+    for vol, doel in sorted(resultaten, reverse=True):
+        if doel not in gezien:
+            gezien.add(doel)
+            uniek.append(doel)
+        if len(uniek) >= max_n:
+            break
+    return uniek
+
+
+_WEBSHOP_DOMEINEN = {
+    "bol.com", "beslist.nl", "amazon.", "coolblue.nl", "vidaxl.", "praxis.nl",
+    "gamma.nl", "hornbach.nl", "karwei.nl", "marktplaats.nl", "google.", "youtube.",
+    "facebook.", "instagram.", "twitter.", "linkedin.", "pinterest.", "fov.nl",
+    "vergelijk.", "kiyoh.", "trustpilot.", "kieskeurig.", "tweakers.",
+}
+
+
+def _is_webshop(url: str) -> bool:
+    url_lower = url.lower()
+    return any(d in url_lower for d in _WEBSHOP_DOMEINEN)
+
+
+def zoek_product_op_web(omschrijving: str, merk: str = "", max_urls: int = 3) -> list[dict]:
+    """
+    Zoekt op DuckDuckGo naar productinformatie en retourneert maximaal max_urls
+    relevante (niet-webshop) pagina's als [{"url": ..., "titel": ..., "snippet": ...}].
+    """
+    if not _DDG_BESCHIKBAAR:
+        return []
+
+    query_delen = []
+    if merk and merk.lower() not in omschrijving.lower():
+        query_delen.append(merk)
+    query_delen.append(omschrijving)
+    query_delen.append("technische gegevens productinformatie")
+    query = " ".join(query_delen)
+
+    try:
+        with _DDGS(verify=False) as ddg:
+            resultaten = ddg.text(query, max_results=10)
+    except Exception:
+        return []
+
+    gevonden = []
+    for r in resultaten:
+        url = r.get("href", "")
+        if not url or _is_webshop(url):
+            continue
+        gevonden.append({
+            "url":     url,
+            "titel":   r.get("title", ""),
+            "snippet": r.get("body", ""),
+        })
+        if len(gevonden) >= max_urls:
+            break
+
+    return gevonden
+
+
+def _haal_pagina_tekst(url: str, max_tekens: int = 3000) -> str:
+    """Haalt leesbare tekst op van een URL."""
+    try:
+        resp = httpx.get(url, timeout=12, follow_redirects=True,
+                         verify=False, headers=_HEADERS)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        return " ".join(soup.get_text(separator=" ").split())[:max_tekens]
+    except Exception:
+        return ""
+
+
+# Domeinen die we voor afbeeldingen wél meenemen (concurrenten hebben goede productfoto's)
+# maar voor tekst uitsluiten. Alleen social media / prijsvergelijkers / marktplaatsen buiten.
+_AFBEELDING_UITSLUIT_DOMEINEN = {
+    "marktplaats.nl", "amazon.", "google.", "youtube.",
+    "facebook.", "instagram.", "twitter.", "linkedin.", "pinterest.",
+    "vergelijk.", "kiyoh.", "trustpilot.", "kieskeurig.", "tweakers.",
+    "beslist.nl", "fov.nl", "vidaxl.",
+}
+
+
+def _zoek_afbeelding_urls(omschrijving: str, merk: str = "", max_urls: int = 8) -> list[dict]:
+    """
+    Zoals zoek_product_op_web maar sluit webshops/concurrenten NIET uit —
+    die hebben juist goede productfoto's op witte achtergrond.
+    """
+    if not _DDG_BESCHIKBAAR:
+        return []
+    query_delen = []
+    if merk and merk.lower() not in omschrijving.lower():
+        query_delen.append(merk)
+    query_delen.append(omschrijving)
+    query = " ".join(query_delen)
+    try:
+        with _DDGS(verify=False) as ddg:
+            resultaten = ddg.text(query, max_results=15)
+    except Exception:
+        return []
+    gevonden = []
+    for r in resultaten:
+        url = r.get("href", "")
+        if not url:
+            continue
+        url_lower = url.lower()
+        if any(d in url_lower for d in _AFBEELDING_UITSLUIT_DOMEINEN):
+            continue
+        gevonden.append({"url": url, "titel": r.get("title", ""), "snippet": r.get("body", "")})
+        if len(gevonden) >= max_urls:
+            break
+    return gevonden
+
+
+def haal_product_afbeelding(product: dict, client=None) -> tuple[list[str], str]:
+    """
+    Zoekt een productafbeelding via DuckDuckGo.
+    Als client meegegeven is: haalt kandidaten op van meerdere pagina's en laat
+    GPT-4o Vision de beste kiezen. Anders: eerste succesvolle pagina (origineel gedrag).
+    Retourneert (paden, bron_log).
+    """
+    if not _DDG_BESCHIKBAAR:
+        return [], ""
+
+    omschrijving = product.get("Omschrijving", "")
+    merk         = product.get("Merk", "")
+
+    omschr_zoek = re.sub(r"\s+(?:RAL|JTN|NCS)\s*[-/]?\s*\d+\S*", "", omschrijving, flags=re.IGNORECASE)
+    omschr_zoek = re.sub(r"\s*[-–]?\s*\bB[0-9]\b", "", omschr_zoek, flags=re.IGNORECASE).strip()
+
+    urls = _zoek_afbeelding_urls(omschr_zoek, merk, max_urls=8)
+    if not urls:
+        return [], ""
+
+    merk_clean = _schone_bestandsnaam(merk or "")
+    omschr     = omschrijving.strip()
+    if merk and omschr.lower().startswith(merk.lower() + " "):
+        omschr = omschr[len(merk):].strip()
+    # Strip RAL/JTN/B-codes en maatsuffix — varianten delen dezelfde blikfoto
+    omschr = re.sub(r"\s+(?:RAL|JTN|NCS)\s*[-/]?\s*\d+\S*", "", omschr, flags=re.IGNORECASE)
+    omschr = re.sub(r"\s*[-–]?\s*\bB[0-9]\b", "", omschr, flags=re.IGNORECASE)
+    omschr = _strip_variant_suffix(omschr).strip()
+    omschr_clean     = _schone_bestandsnaam(omschr).strip(" -")
+    afbeelding_basis = f"{merk_clean.title()} {omschr_clean}" if omschr_clean else merk_clean.title()
+    merk_dir         = AFBEELDING_BASE_DIR / merk_clean.lower().strip()
+
+    if client:
+        # Vision-modus: verzamel max 5 kandidaten van verschillende pagina's, AI kiest de beste
+        zoekwoorden = [re.sub(r"[^a-z0-9]", "", merk_clean.lower())]
+        for woord in omschr_zoek.lower().split():
+            slug = re.sub(r"[^a-z0-9]", "", woord)
+            if len(slug) > 2:
+                zoekwoorden.append(slug)
+
+        kandidaten: list[dict] = []
+        for bron in urls[:6]:
+            if len(kandidaten) >= 5:
+                break
+            resultaat = _kandidaat_bytes_van_pagina(bron["url"], zoekwoorden)
+            if resultaat:
+                img_bytes, img_url = resultaat
+                kandidaten.append({"bytes": img_bytes, "page_url": bron["url"], "img_url": img_url})
+
+        if not kandidaten:
+            return [], ""
+
+        beste_idx = _beoordeel_afbeeldingen_vision(kandidaten, client, omschrijving)
+        beste     = kandidaten[beste_idx]
+        save_pad  = merk_dir / f"{afbeelding_basis}.jpg"
+
+        if _verwerk_afbeelding(beste["bytes"], save_pad):
+            domein   = urlparse(beste["page_url"]).netloc
+            bron_log = f"{len(kandidaten)} kandidaten beoordeeld, #{beste_idx + 1} gekozen ({domein})"
+            return [str(save_pad)], bron_log
+        return [], ""
+
+    else:
+        # Origineel gedrag: eerste succesvolle pagina
+        for bron in urls:
+            url = bron["url"]
+            try:
+                resp = httpx.get(url, timeout=15, follow_redirects=True,
+                                 verify=False, headers=_HEADERS)
+                resp.raise_for_status()
+            except Exception:
+                continue
+            soup  = BeautifulSoup(resp.text, "html.parser")
+            paden = _download_afbeeldingen(soup, url, merk_clean, afbeelding_basis)
+            if paden:
+                return paden, ""
+        return [], ""
+
+
+def haal_web_bronnen(product: dict) -> tuple[str, str]:
+    """
+    Zoekt productinformatie op het web als fallback wanneer geen PIB beschikbaar is.
+    Retourneert (gecombineerde_tekst, log_string).
+    """
+    omschrijving = product.get("Omschrijving", "")
+    merk         = product.get("Merk", "")
+
+    urls = zoek_product_op_web(omschrijving, merk)
+    if not urls:
+        return "", ""
+
+    tekst_delen = []
+    gebruikte_bronnen = []
+
+    for bron in urls:
+        tekst = _haal_pagina_tekst(bron["url"])
+        if len(tekst) < 200:
+            # Pagina leeg of geblokkeerd — gebruik dan snippet van DDG
+            tekst = bron["snippet"]
+        if tekst:
+            tekst_delen.append(f"[Bron: {bron['titel']} — {bron['url']}]\n{tekst}")
+            gebruikte_bronnen.append(bron["url"])
+
+    gecombineerd = "\n\n".join(tekst_delen)[:6000]
+    log = f"Web: {len(gebruikte_bronnen)} pagina(s) — {', '.join(gebruikte_bronnen[:2])}"
+    return gecombineerd, log
+
+
+def lees_pib_vib_tekst(product: dict) -> tuple[str, str, str]:
+    """
+    Zoekt en leest de PIB en VIB voor een product.
+    Geeft (pib_tekst, vib_tekst, gevonden_paden_log) terug.
+    """
+    merk         = str(product.get("Merk") or "")
+    omschrijving = str(product.get("Omschrijving") or "")
+
+    pib_pad = _zoek_pdf(config.PIB_BASE_DIR, merk, omschrijving, "PIB")
+    vib_pad = _zoek_pdf(config.VIB_BASE_DIR, merk, omschrijving, "VIB")
+
+    pib_tekst = _lees_pdf_tekst(pib_pad) if pib_pad else ""
+    vib_tekst = _lees_pdf_tekst(vib_pad) if vib_pad else ""
+
+    gevonden = []
+    if pib_pad: gevonden.append(f"PIB: {pib_pad.name}")
+    if vib_pad: gevonden.append(f"VIB: {vib_pad.name}")
+
+    return pib_tekst, vib_tekst, " | ".join(gevonden)
+
+
+# ─────────────────────────────────────────────
 #  AI PROMPT
 # ─────────────────────────────────────────────
 
 def maak_prompt(product: dict, attribuutsets: list[dict], categorieen: list[dict], idx: int,
-                pagina_tekst: str = "") -> str:
+                pagina_tekst: str = "", pib_tekst: str = "", vib_tekst: str = "",
+                zoekwoorden: list[str] | None = None) -> str:
     omschrijving = product.get("Omschrijving", "")
     merk         = product.get("Merk", "")
     artikelnr    = product.get("Artikelnummer", "")
@@ -409,8 +1142,12 @@ def maak_prompt(product: dict, attribuutsets: list[dict], categorieen: list[dict
     )
     if pagina_tekst:
         extra_info = (extra_info + " | " if extra_info else "") + f"Leverancierspagina: {pagina_tekst}"
+    if pib_tekst:
+        extra_info = (extra_info + " | " if extra_info else "") + f"Productinformatieblad: {pib_tekst}"
+    if vib_tekst:
+        extra_info = (extra_info + " | " if extra_info else "") + f"Veiligheidsinformatieblad: {vib_tekst[:1500]}"
 
-    usp = config.SHOP_USPS[idx % len(config.SHOP_USPS)]
+    usp = config.SHOP_USPS[idx % len(config.SHOP_USPS)]  # niet meer in 1N1 gebruikt
 
     attrib_sectie = (
         _compacte_attribuutset_lijst(attribuutsets)
@@ -423,8 +1160,28 @@ def maak_prompt(product: dict, attribuutsets: list[dict], categorieen: list[dict
         else "  (geen referentiebestand gevonden – gebruik beste schatting)"
     )
 
-    return f"""Je bent een productspecialist en SEO-expert voor {config.BEDRIJF_NAAM}. {config.BEDRIJF_NAAM} is {config.BEDRIJF_OMSCHRIJVING}.
+    if zoekwoorden:
+        kw_instructie = (
+            f"\n  - Gebruik bij voorkeur 1-2 van deze zoekwoorden uit onze database "
+            f"als ze relevant zijn voor dit product: {', '.join(zoekwoorden)}"
+        )
+    else:
+        kw_instructie = ""
 
+    pib_instructie = ""
+    if pib_tekst:
+        pib_instructie = """
+PIB-INSTRUCTIES (productinformatieblad beschikbaar):
+- Haal de volledige verbruiks/opbrengsttabel over uit het PIB met ALLE ondergrondtypen en bijbehorende waarden. Render dit als HTML-tabel in het Verbruik-blok. Verzin dit NOOIT.
+- Haal droogtijden LETTERLIJK over (bijv. "5-7 uur voor voetverkeer, 48-72 uur voor voertuigen").
+- Haal toepassingsoppervlakken LETTERLIJK over (specifieke materialen zoals graniet, kalksteen, terracotta).
+- 'Houdbaarheid' in het PIB = houdbaarheid van de verpakking (niet hoe lang de bescherming duurt). Noem dit NIET als productvoordeel.
+- Belangrijke verwerkingswaarschuwingen (bijv. "niet verdunnen", "niet aanbrengen bij regen") verwerken in Verwerkingstips.
+- Temperatuurbereik voor verwerking vermelden als dat in het PIB staat.
+"""
+
+    return f"""Je bent een productspecialist en SEO-expert voor {config.BEDRIJF_NAAM}. {config.BEDRIJF_NAAM} is {config.BEDRIJF_OMSCHRIJVING}.
+{pib_instructie}
 PRODUCT:
 Artikelnummer: {artikelnr}
 Omschrijving: {omschrijving}
@@ -441,16 +1198,18 @@ CATEGORIEINDELING – kies 1 tot 3 best passende IDs uit deze lijst:
 
 TAALCODE REGELS:
 1N1 (meta titel):
-  - Structuur: [MERK] [VOLLEDIGE PRODUCTNAAM + SPECIFICATIES] | [USP] | FOV
+  - Structuur: [MERK] [VOLLEDIGE PRODUCTNAAM] | FOV
+  - Maximaal 2 segmenten gescheiden door één |, nooit meer
   - MINIMAAL 60, MAXIMAAL 70 tekens – tel exact
-  - Gebruik bij voorkeur deze USP: "{usp}"
+  - Als de productnaam + merk minder dan 57 tekens is: voeg de eenheid toe (bijv. "5 liter", "Can 10 liter") zodat je op 60-70 komt
   - Merk altijd vooraan, GEEN CTA-woorden (kopen/bestellen)
   - Eindigt exact op " | {config.BEDRIJF_NAAM}"
 
 1N2 (meta description):
   - MINIMAAL 150, MAXIMAAL 160 tekens
-  - Bevat merk + productnaam + minimaal 2 concrete eigenschappen
-  - Sluit af met "bij {config.BEDRIJF_NAAM}" of variatie
+  - Verwerk minimaal 2 concrete zoekwoorden die mensen gebruiken bij dit type product (bijv. materiaalnaam, toepassingsvorm, eigenschap){kw_instructie}
+  - Geen herhaling van dezelfde gedachte in twee zinnen
+  - Sluit af met een korte slotzin zoals "Bestel bij {config.BEDRIJF_NAAM}." of "Verkrijgbaar bij {config.BEDRIJF_NAAM}." — {config.BEDRIJF_NAAM} mag maar EENMAAL voorkomen in de gehele 1N2
   - GEEN "u" of "uw"
 
 1NT (webtitel):
@@ -470,8 +1229,6 @@ TAALCODE REGELS:
 
   <style>
     .tab-style {{ display: block; padding: 1rem; border: 1px solid #ccc; background: white; margin-bottom: 1.5rem; border-radius: 5px; }} .tab-style h2 {{ margin-top: 0; color: #103a5d; }} .tab-style strong {{ color: #103a5d; }}
-  </style>
-  <style>
     .tabs {{ margin-top: 2rem; }} .tabs input[type="radio"] {{ display: none; }} .tabs label {{ padding: 0.5rem 1rem; background: #eee; margin-right: 0.2rem; cursor: pointer; border-top-left-radius: 5px; border-top-right-radius: 5px; font-weight: bold; color: #103a5d; }} .tabs label:hover {{ background: #ddd; }} .tabs .tab-content {{ display: none; border: 1px solid #ccc; padding: 1rem; background: white; border-top: none; border-radius: 0 0 5px 5px; }} .tabs input[type="radio"]:checked + label {{ background: #103a5d; color: white; }} .tabs input[type="radio"]:checked + label + .tab-content {{ display: block; }}
   </style>
 
@@ -494,9 +1251,9 @@ TAALCODE REGELS:
     </div>
   </section>
   <div style="display:flex;flex-wrap:wrap;gap:1rem;margin-top:2rem;">
-    <div style="flex:1;background:#f5f5f5;padding:1rem;"><strong>Verbruik</strong><p>[verbruik alleen als bekend uit productdata, anders weglaten]</p></div>
-    <div style="flex:1;background:#f5f5f5;padding:1rem;"><strong>Droogtijd</strong><p>[droogtijd alleen als bekend uit productdata, anders weglaten]</p></div>
-    <div style="flex:1;background:#f5f5f5;padding:1rem;"><strong>Toepassing</strong><p>[verwerkingswijze alleen als bekend uit productdata, anders weglaten]</p></div>
+    <div style="flex:1;background:#f5f5f5;padding:1rem;"><strong>Verbruik</strong>[Als het PIB een verbruikstabel per ondergrondtype heeft: render die VOLLEDIG als HTML-tabel: <table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:0.5rem"><thead><tr><th style="text-align:left;border-bottom:1px solid #ccc;padding:4px 8px">Ondergrond</th><th style="text-align:left;border-bottom:1px solid #ccc;padding:4px 8px">m² per liter</th></tr></thead><tbody><tr><td style="padding:4px 8px">[ondergrond]</td><td style="padding:4px 8px">[waarde]</td></tr>...</tbody></table> — neem ALLE rijen over uit het PIB. Als er geen tabel is: één zin met het verbruik. Blok weglaten als verbruik volledig onbekend.]</div>
+    <div style="flex:1;background:#f5f5f5;padding:1rem;"><strong>Droogtijd</strong><p>[droogtijd voor gebruik/voetverkeer/voertuigen — ALLEEN uit PIB, anders blok weglaten]</p></div>
+    <div style="flex:1;background:#f5f5f5;padding:1rem;"><strong>Toepassing</strong><p>[verwerkingstemperatuur en -methode — ALLEEN uit PIB, anders blok weglaten]</p></div>
   </div>
   BELANGRIJK: laat een heel spec-blok weg als de waarde niet uit de productdata bekend is. Verzin NOOIT verbruik, droogtijd of technische specs.
   <div style="display:flex;flex-wrap:wrap;gap:1rem;margin-top:1rem;">
@@ -565,7 +1322,7 @@ def vraag_openai(prompt: str, client: OpenAI, model: str) -> dict:
             },
             {"role": "user", "content": prompt}
         ],
-        max_tokens=2000,
+        max_tokens=4000,
         response_format={"type": "json_object"}
     )
     tekst = response.choices[0].message.content.strip()
@@ -611,11 +1368,27 @@ def verwerk_product(
     client: OpenAI,
     model: str,
     log_func,
+    zoekwoorden_data: list[dict] | None = None,
+    merk_domeinen: dict | None = None,
+    genereer_de: bool = False,
+    genereer_jl: bool = False,
 ) -> dict:
     artikelnr = product.get("Artikelnummer", f"#{idx+1}")
     pagina    = {"tekst": "", "pib_url": "", "vib_url": ""}
 
     url = str(product.get("URL_leverancier", "") or "").strip()
+
+    # Auto-detectie: zoek leveranciers-URL via merkdomein als geen URL opgegeven
+    if not url.startswith("http") and merk_domeinen:
+        gevonden = zoek_leverancier_url(
+            str(product.get("Merk", "") or ""),
+            str(product.get("Omschrijving", "") or ""),
+            merk_domeinen,
+        )
+        if gevonden:
+            url = gevonden
+            log_func(f"  URL gevonden via merkdomein: {url[:70]}", "info")
+
     if url.startswith("http"):
         log_func(f"  Pagina ophalen: {url[:70]}", "info")
         pagina = haal_leverancier_pagina(
@@ -628,8 +1401,39 @@ def verwerk_product(
         if pagina["vib_pad"]:
             log_func(f"  VIB opgeslagen: {pagina['vib_pad']}", "success")
 
+    # PIB/VIB van K-schijf lezen
+    pib_tekst, vib_tekst, pdf_log = lees_pib_vib_tekst(product)
+    if pdf_log:
+        log_func(f"  PDFs gelezen: {pdf_log}", "info")
+
+    # Webzoek als fallback wanneer geen PIB beschikbaar is
+    web_tekst = ""
+    if not pib_tekst and not pagina["tekst"]:
+        log_func(f"  Geen PIB gevonden — zoeken op web…", "info")
+        web_tekst, web_log = haal_web_bronnen(product)
+        if web_log:
+            log_func(f"  {web_log}", "info")
+        elif _DDG_BESCHIKBAAR:
+            log_func(f"  Geen webresultaten gevonden", "warning")
+
+    extra_tekst = pagina["tekst"] or web_tekst
+
+    # Afbeelding zoeken via web als er nog geen beschikbaar is (URL_leverancier ontbreekt)
+    if not pagina.get("afbeeldingen"):
+        afb, afb_log = haal_product_afbeelding(product, client=client)
+        if afb:
+            log_msg = f"  Afbeelding: {Path(afb[0]).name}"
+            if afb_log:
+                log_msg += f" ({afb_log})"
+            log_func(log_msg, "success")
+        pagina["afbeeldingen"] = afb
+
     try:
-        prompt = maak_prompt(product, attribuutsets, categorieen, idx, pagina["tekst"])
+        kw_matches = zoek_relevante_keywords(product, zoekwoorden_data or [])
+        if kw_matches:
+            log_func(f"  Zoekwoorden gevonden: {', '.join(kw_matches[:3])}{'…' if len(kw_matches) > 3 else ''}", "info")
+        prompt = maak_prompt(product, attribuutsets, categorieen, idx, extra_tekst,
+                             pib_tekst, vib_tekst, kw_matches or None)
         ai     = vraag_openai(prompt, client, model)
 
         # Vervang em/en-dashes door gewoon koppelteken (voorkomt encoding-problemen in KING)
@@ -637,12 +1441,102 @@ def verwerk_product(
             if isinstance(v, str):
                 ai[k] = v.replace("—", " - ").replace("–", " - ")
 
-        # Controleer 1N1 lengte en corrigeer lichte overschrijding
+        suffix = f" | {config.BEDRIJF_NAAM}"
+
+        # Verwijder dubbele pipes (AI-artefact)
+        ai["1N1"] = re.sub(r"\s*\|\s*\|\s*", " | ", ai.get("1N1", ""))
+
+        # Zorg dat 1N1 eindigt op " | {BEDRIJF_NAAM}" en max 2 segmenten heeft
         n1 = ai.get("1N1", "")
+        segmenten = [s.strip() for s in n1.split("|")]
+        n1_body = segmenten[0].strip()
+
+        # Verwijder dubbel merk: "Hempel Hempel's..." → "Hempel's..."
+        merk = str(product.get("Merk", "") or "").strip()
+        if merk:
+            merk_lower = merk.lower()
+            body_lower = n1_body.lower()
+            if body_lower.startswith(merk_lower + " " + merk_lower):
+                n1_body = n1_body[len(merk) + 1:].strip()
+
+        # Eigenmerkartikel: merk == bedrijfsnaam → "FOV Plamuurmes | FOV" is redundant
+        if merk and merk.lower() == config.BEDRIJF_NAAM.lower():
+            if n1_body.lower().startswith(merk.lower() + " "):
+                n1_body = n1_body[len(merk):].strip()
+
+        n1 = n1_body + suffix  # altijd 2 segmenten
+
+        # Te kort: probeer eenheid toe te voegen
+        if len(n1) < 60:
+            eenheid = str(product.get("Eenheid", "") or "").strip()
+            eenheid_woorden = [w for w in eenheid.lower().split() if len(w) >= 3]
+            al_aanwezig = any(w in n1.lower() for w in eenheid_woorden)
+            if eenheid and not al_aanwezig:
+                n1_met = n1_body + " " + eenheid + suffix  # n1_body, niet segmenten[0]
+                if len(n1_met) <= 70:
+                    n1 = n1_met
+
+        # Te lang: afkappen voor suffix
         if len(n1) > 70:
-            ai["1N1"] = n1[:67].rsplit(" ", 1)[0] + " | FOV"
+            n1 = n1[:70 - len(suffix)].rsplit(" ", 1)[0] + suffix
+
+        ai["1N1"] = n1
+
+        # Verwijder dubbele FOV-vermelding in 1N2
+        n2 = ai.get("1N2", "")
+        bedrijf_lower = config.BEDRIJF_NAAM.lower()
+        n2_zinnen = re.split(r"(?<=[.!?])\s+", n2.strip())
+        # Bewaar alleen de eerste zin die BEDRIJF_NAAM bevat; verwijder duplicaten
+        fov_gezien = False
+        gefilterd = []
+        for zin in n2_zinnen:
+            if bedrijf_lower in zin.lower():
+                if not fov_gezien:
+                    gefilterd.append(zin)
+                    fov_gezien = True
+            else:
+                gefilterd.append(zin)
+        n2 = " ".join(gefilterd)
+
+        # Lengte 1N2 controleren — afkappen op laatste volledige zin binnen 160 tekens
+        if len(n2) > 160:
+            zinnen = re.split(r"(?<=[.!?])\s+", n2.strip())
+            passend = ""
+            for zin in zinnen:
+                kandidaat = (passend + " " + zin).strip() if passend else zin
+                if len(kandidaat) <= 160:
+                    passend = kandidaat
+                else:
+                    break
+            n2 = passend if passend else n2[:160].rsplit(" ", 1)[0]
+
+        # Losse check: te kort → aanvullen (ook na truncatie), maar nooit boven 160
+        if len(n2) < 150 and n2:
+            if bedrijf_lower not in n2.lower():
+                kandidaat = n2.rstrip(".") + f". Bestel snel bij {config.BEDRIJF_NAAM}."
+            else:
+                stripped = n2.rstrip()
+                sep = " " if stripped.endswith(".") else ". "
+                kandidaat = stripped + sep + "Snel geleverd."
+            if len(kandidaat) <= 160:
+                n2 = kandidaat
+
+        ai["1N2"] = n2
 
         log_func(f"✓ {artikelnr} – 1N1: {len(ai.get('1N1',''))}t, 1N2: {len(ai.get('1N2',''))}t", "success")
+
+        if genereer_de:
+            log_func(f"  DE taalcodes genereren…", "info")
+            de = genereer_de_taalcodes(product, ai, client)
+            ai.update(de)
+            log_func(f"  DE klaar – 4D1: {len(de.get('4D1_FOV_DE_META_DATA_1',''))}t", "success")
+
+        if genereer_jl:
+            log_func(f"  Jachtlakken taalcodes genereren…", "info")
+            jl = genereer_jl_taalcodes(product, ai, client)
+            ai.update(jl)
+            log_func(f"  JL klaar – 2N1: {len(jl.get('2N1_JL_NL_META_DATA_1',''))}t", "success")
+
         return {**product, "_ai": ai, "_pagina": pagina, "_status": "success"}
 
     except Exception as e:
@@ -663,7 +1557,14 @@ def bouw_excel(
     categorieen: list[dict],
     log_func,
     progress_func,
+    zoekwoorden_data: list[dict] | None = None,
+    merk_domeinen: dict | None = None,
+    output_json_pad: Path | None = None,
+    genereer_de: bool = False,
+    genereer_jl: bool = False,
 ) -> Path:
+    kolommen = KOLOMMEN + (DE_KOLOMMEN if genereer_de else []) + (JL_KOLOMMEN if genereer_jl else [])
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "KING Import"
@@ -679,7 +1580,7 @@ def bouw_excel(
         bottom=Side(style="thin", color="CCCCCC"),
     )
 
-    for ci, kol in enumerate(KOLOMMEN, 1):
+    for ci, kol in enumerate(kolommen, 1):
         c = ws.cell(row=1, column=ci, value=kol)
         c.font = hdr_font; c.fill = hdr_fill
         c.alignment = hdr_align; c.border = rand
@@ -687,14 +1588,31 @@ def bouw_excel(
     ws.freeze_panes = "A2"
 
     verwerkte_producten = []
+    _alle_waarden: list[dict] = []
 
     for i, product in enumerate(producten):
         progress_func(i + 1, len(producten))
-        result = verwerk_product(product, i, attribuutsets, categorieen, client, model, log_func)
+        result = verwerk_product(product, i, attribuutsets, categorieen, client, model, log_func,
+                                 zoekwoorden_data=zoekwoorden_data,
+                                 merk_domeinen=merk_domeinen or {},
+                                 genereer_de=genereer_de,
+                                 genereer_jl=genereer_jl)
         verwerkte_producten.append(result)
 
         if i < len(producten) - 1:
             time.sleep(0.5)
+
+    # Kopieer 1NL van parent naar children (variantengroep)
+    parent_ai = {
+        r["Artikelnummer"]: r.get("_ai", {})
+        for r in verwerkte_producten
+        if r.get("_type") == "parent"
+    }
+    for result in verwerkte_producten:
+        if result.get("_type") == "child":
+            parent_code = result.get("_parent_code", "")
+            if parent_code in parent_ai:
+                result["_ai"]["1NL"] = parent_ai[parent_code].get("1NL", result["_ai"].get("1NL", ""))
 
     for ri, result in enumerate(verwerkte_producten, 2):
         ai  = result.get("_ai", _fallback_waarden(result))
@@ -741,8 +1659,10 @@ def bouw_excel(
             "ArtikelOmschrijvingLeverancier":       result.get("Omschrijving", ""),
             "ArtikelNummerBijLeverancier":          result.get("ArtikelNummerBijLeverancier", "") or "",
             "EanCode":                              result.get("EanCode", "") or "",
-            "VR_ART_Magentotype":                   "Simpel",
-            "VR_ART_Zichtbaarheid":                 "Catalogus, zoeken",
+            "VR_ART_Magentotype":                   "Configureerbaar" if result.get("_type") == "parent" else "Simpel",
+            "VR_ART_Zichtbaarheid":                 "Niet individueel zichtbaar" if result.get("_type") == "child" else "Catalogus, zoeken",
+            "VR_ART_Virtueel_Artikel_SKU":          result.get("_parent_code", "") if result.get("_type") == "child" else (result.get("Artikelnummer", "") if result.get("_type") == "parent" else ""),
+            "VR_ART_Configuratie_op":              result.get("_configuratie_op", ""),
             "VR_ART_Actief_in_shop":                config.ACTIEF_IN_SHOP,
             "VR_ART_F-Merk":                        result.get("Merk", ""),
             "VR_ART_Extra_afbeelding_1":            afbeeldingen[1] if len(afbeeldingen) > 1 else "",
@@ -752,16 +1672,6 @@ def bouw_excel(
             "VR_ART_Extra_afbeelding_5":            afbeeldingen[5] if len(afbeeldingen) > 5 else "",
             "VR_ART_Productinformatieblad_NL":      pib_pad,
             "VR_ART_Productveiligheidsblad_NL_A":   vib_pad,
-            "VR_ART_Productveiligheidsblad_NL_B":   "",
-            "VR_ART_Productveiligheidsblad_NL_C":   "",
-            "VR_ART_Productveiligheidsblad_ENG_A":  "",
-            "VR_ART_Productveiligheidsblad_ENG_B":  "",
-            "VR_ART_Productveiligheidsblad_ENG_C":  "",
-            "VR_ART_Productveiligheidsblad_DE_A":   "",
-            "VR_ART_Productveiligheidsblad_DE_B":   "",
-            "VR_ART_Productveiligheidsblad_DE_C":   "",
-            "VR_ART_Explosietekening_UNI":          "",
-            "VR_ART_Producthandleiding_NL":         "",
             "VR_ART_Attribuutset_V4":               ai.get("attribuutset_code", ""),
             "1NT_FOV_NL_TITLE_WEB":                 ai.get("1NT", ""),
             "1NF_FOV_NL_TITLE_FACTUUR":             ai.get("1NF", ""),
@@ -773,17 +1683,35 @@ def bouw_excel(
             "Attribuutset_Label":                   ai.get("attribuutset_label", ""),
             "VR_ART_Webcategorie_ID._V2":           ai.get("categorie_ids", ""),
             "Webcategorie_Confidence_%":            f"{float(ai.get('categorie_confidence', 0))*100:.0f}%",
+            # DE taalcodes (alleen gevuld als genereer_de=True)
+            "4D1_FOV_DE_META_DATA_1":              ai.get("4D1_FOV_DE_META_DATA_1", ""),
+            "4D2_FOV_DE_META_DATA_2":              ai.get("4D2_FOV_DE_META_DATA_2", ""),
+            "4DF_FOV_DE_TITLE_FACTUUR":            ai.get("4DF_FOV_DE_TITLE_FACTUUR", ""),
+            "4DT_FOV_DE_TITLE_WEB":                ai.get("4DT_FOV_DE_TITLE_WEB", ""),
+            "4DU_FOV_DE_URL":                      ai.get("4DU_FOV_DE_URL", ""),
+            "4DL_FOV_DE_LANGE_OMSCHRIJVING":       ai.get("4DL_FOV_DE_LANGE_OMSCHRIJVING", ""),
+            # JL taalcodes (alleen gevuld als genereer_jl=True)
+            "2N1_JL_NL_META_DATA_1":               ai.get("2N1_JL_NL_META_DATA_1", ""),
+            "2N2_JL_NL_META_DATA_2":               ai.get("2N2_JL_NL_META_DATA_2", ""),
+            "2NF_JL_NL_TITLE_FACTUUR":             ai.get("2NF_JL_NL_TITLE_FACTUUR", ""),
+            "2NT_JL_NL_TITLE_WEB":                 ai.get("2NT_JL_NL_TITLE_WEB", ""),
+            "2NH_JL_NL_URL":                       ai.get("2NH_JL_NL_URL", ""),
+            "2NL_JL_NL_LANGE_OMSCHRIJVING":        ai.get("2NL_JL_NL_LANGE_OMSCHRIJVING", ""),
         }
 
-        for ci, kol in enumerate(KOLOMMEN, 1):
+        for ci, kol in enumerate(kolommen, 1):
             cel = ws.cell(row=ri, column=ci, value=waarden.get(kol, ""))
             cel.font = data_font; cel.alignment = data_align; cel.border = rand
             if kol in HANDMATIG:
                 cel.fill = PatternFill("solid", fgColor=config.CLR_ORANJE)
-            elif kol in AI_VELDEN:
+            elif kol in JL_VELDEN:
+                cel.fill = PatternFill("solid", fgColor="C9EFF1")
+            elif kol in AI_VELDEN or kol in DE_VELDEN:
                 cel.fill = PatternFill("solid", fgColor=config.CLR_GROEN)
             elif kol in MAPPING_VELDEN:
                 cel.fill = cf
+
+        _alle_waarden.append(waarden)
 
     # Kolombreedte
     breedte = {
@@ -796,11 +1724,16 @@ def bouw_excel(
         "Attribuutset_Label": 26, "VR_ART_Webcategorie_ID._V2": 24,
         "Webcategorie_Confidence_%": 14,
     }
-    for ci, kol in enumerate(KOLOMMEN, 1):
+    for ci, kol in enumerate(kolommen, 1):
         ws.column_dimensions[get_column_letter(ci)].width = breedte.get(kol, 17)
 
     _voeg_legenda_toe(wb, attribuutsets)
     wb.save(output_pad)
+
+    if output_json_pad and _alle_waarden:
+        with open(output_json_pad, "w", encoding="utf-8") as _f:
+            json.dump(_alle_waarden, _f, ensure_ascii=False, default=str)
+
     log_func(f"Klaar — {len(producten)} producten → {output_pad.name}", "success")
     return output_pad
 
@@ -884,15 +1817,32 @@ def _voeg_legenda_toe(wb: openpyxl.Workbook, attribuutsets: list[dict]):
 #  INVOER INLEZEN
 # ─────────────────────────────────────────────
 
+_KOLOM_ALIASSEN = {
+    "Artikelomschrijving": "Omschrijving",
+    "Artikelnaam":         "Omschrijving",
+    "ProductNaam":         "Omschrijving",
+    "EAN":                 "EanCode",
+    "EAN-code":            "EanCode",
+    "Leverancier":         "Merk",
+    "F-merk":              "Merk",
+}
+
+
 def lees_invoer(pad: Path) -> list[dict]:
     """Lees Excel of CSV invoerbestand naar lijst van dicts."""
     suffix = pad.suffix.lower()
     if suffix == ".csv":
-        df = pd.read_csv(pad, encoding="utf-8-sig")
+        # Auto-detect separator: als meer puntkomma's dan komma's in regel 1 → puntkomma
+        with open(pad, encoding="utf-8-sig", errors="replace") as fh:
+            eerste_regel = fh.readline()
+        sep = ";" if eerste_regel.count(";") > eerste_regel.count(",") else ","
+        df = pd.read_csv(pad, encoding="utf-8-sig", sep=sep)
     elif suffix in (".xlsx", ".xls"):
         df = pd.read_excel(pad)
     else:
         raise ValueError(f"Niet-ondersteund bestandsformaat: {suffix}")
+
+    df.rename(columns=_KOLOM_ALIASSEN, inplace=True)
 
     import math
     df.columns = [str(c).strip() for c in df.columns]
@@ -927,16 +1877,20 @@ if __name__ == "__main__":
     producten    = lees_invoer(invoer_pad)
     attribuutsets = laad_attribuutset(config.ATTRIBUUTSET_FILE)
     categorieen   = laad_categorieindeling(config.CATEGORIE_FILE)
-    client       = OpenAI(api_key=config.OPENAI_API_KEY)
+    client       = OpenAI(api_key=config.OPENAI_API_KEY,
+                          http_client=httpx.Client(verify=False))
 
     print(f"Producten: {len(producten)}")
     print(f"Attribuutsets geladen: {len(attribuutsets)}")
-    print(f"Categorieën geladen:   {len(categorieen)}")
+    print(f"Categorieen geladen:   {len(categorieen)}")
 
     datum      = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_pad = config.OUTPUT_DIR / f"KING_import_{datum}.xlsx"
 
     totaal = [0]
+
+    import sys
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     def log(msg, t="info"):
         print(msg)

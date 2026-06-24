@@ -8,3 +8,14 @@ test_output/
 referentiedata/attribuutset_v4.xlsx
 referentiedata/categorieindeling.xlsx
 referentiedata/merk_domeinen.json
+referentiedata/_analyse_script.py
+referentiedata/language-codes.csv
+referentiedata/tekst_analyse.md
+
+# Interne configuratie en testscripts
+config.py
+STATUS.md
+_bouw_pilot.py
+_kw_check.py
+_selecteer_test.py
+run_test.py

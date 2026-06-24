@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KING Push Geschiedenis</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; background: #F5F7FA; color: #1F2933; font-size: 13px; }
+
+  header {
+    background: #002B5C; color: #fff; padding: 14px 24px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  header .logo { font-size: 20px; font-weight: bold; }
+  header .titel { font-size: 13px; color: #00A3A1; }
+  header a { color: #A8D8D8; font-size: 12px; margin-left: auto; text-decoration: none; }
+  header a:hover { color: #fff; }
+
+  main { max-width: 1100px; margin: 28px auto; padding: 0 16px; }
+  h2 { color: #002B5C; font-size: 15px; margin-bottom: 14px; }
+
+  .kaart {
+    background: #fff; border-radius: 8px; border: 1px solid #DDE1E7;
+    padding: 20px; margin-bottom: 20px;
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { background: #002B5C; color: #fff; padding: 7px 10px; text-align: left; font-size: 12px; }
+  td { padding: 6px 10px; border-bottom: 1px solid #E5E7EB; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr.expandable:hover td { background: #F0F9FF; cursor: pointer; }
+
+  .badge {
+    display: inline-block; font-size: 11px; padding: 2px 7px;
+    border-radius: 10px; font-weight: bold;
+  }
+  .badge-ok      { background: #D1FAE5; color: #065F46; }
+  .badge-fout    { background: #FEE2E2; color: #991B1B; }
+  .badge-deel    { background: #FEF3C7; color: #92400E; }
+  .badge-bezig   { background: #DBEAFE; color: #1E40AF; }
+
+  .detail-rij { display: none; }
+  .detail-rij.open { display: table-row; }
+  .detail-cel { padding: 0; }
+  .detail-inhoud {
+    background: #F9FAFB; border-top: 1px solid #E5E7EB;
+    padding: 12px 16px;
+  }
+
+  .diff-oud { color: #DC2626; text-decoration: line-through; font-style: italic; }
+  .diff-nieuw { color: #059669; }
+  .geen-wijz { color: #9CA3AF; font-style: italic; }
+
+  .subtabel th { background: #374151; font-size: 11px; }
+  .subtabel td { font-size: 11px; }
+  .call-ok td  { background: #F0FDF4; }
+  .call-fout td { background: #FFF5F5; }
+
+  .lege-staat { color: #6B7280; font-style: italic; text-align: center; padding: 24px; }
+
+  .expand-icon { color: #9CA3AF; margin-right: 6px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">ERP</span>
+  <span class="titel">KING Push Geschiedenis</span>
+  <a href="/">← Terug naar generator</a>
+</header>
+
+<main>
+  <div class="kaart">
+    <h2>Push-sessies</h2>
+    {% if not sessies %}
+      <p class="lege-staat">Nog geen push-sessies. Genereer eerst producten en klik op "Push naar KING".</p>
+    {% else %}
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Datum &amp; tijd</th>
+          <th>Gebruiker</th>
+          <th>Artikelen</th>
+          <th>Gelukt</th>
+          <th>Mislukt</th>
+        </tr>
+      </thead>
+      <tbody id="sessie-tbody">
+        {% for s in sessies %}
+        <tr class="expandable" onclick="toggleSessie({{ s.id }}, this)">
+          <td><span class="expand-icon">▶</span>{{ s.id }}</td>
+          <td>{{ s.tijdstip | replace('T', ' ') }}{% if s.dry_run %} <span class="badge" style="background:#EDE9FE;color:#5B21B6;">dry-run</span>{% endif %}</td>
+          <td>{{ s.gebruiker }}</td>
+          <td>{{ s.n_artikelen }}</td>
+          <td><span class="badge badge-ok">{{ s.n_gelukt }}</span></td>
+          <td>{% if s.n_mislukt > 0 %}<span class="badge badge-fout">{{ s.n_mislukt }}</span>{% else %}<span class="badge badge-ok">0</span>{% endif %}</td>
+        </tr>
+        <tr class="detail-rij" id="sessie-detail-{{ s.id }}">
+          <td class="detail-cel" colspan="6">
+            <div class="detail-inhoud" id="sessie-inhoud-{{ s.id }}">
+              <em>Laden...</em>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+</main>
+
+<script>
+const geladen = {};
+
+async function toggleSessie(sessieId, rij) {
+  const detailRij   = document.getElementById('sessie-detail-' + sessieId);
+  const inhoud      = document.getElementById('sessie-inhoud-' + sessieId);
+  const icon        = rij.querySelector('.expand-icon');
+  const isOpen      = detailRij.classList.contains('open');
+
+  if (isOpen) {
+    detailRij.classList.remove('open');
+    icon.textContent = '▶';
+    return;
+  }
+
+  detailRij.classList.add('open');
+  icon.textContent = '▼';
+
+  if (geladen[sessieId]) return;
+  geladen[sessieId] = true;
+
+  try {
+    const resp     = await fetch('/push-geschiedenis?sessie_id=' + sessieId);
+    const artikelen = await resp.json();
+
+    if (!artikelen.length) {
+      inhoud.innerHTML = '<em style="color:#6B7280">Geen artikelen in deze sessie.</em>';
+      return;
+    }
+
+    let html = `
+      <table class="subtabel" style="margin-bottom:0">
+        <thead><tr>
+          <th>Artikelnummer</th><th>Omschrijving</th>
+          <th>Status</th><th>Calls</th><th>Fouten</th><th></th>
+        </tr></thead>
+        <tbody>
+    `;
+
+    for (const a of artikelen) {
+      const badge = badgeStatus(a.status);
+      html += `
+        <tr class="expandable" onclick="toggleArtikel(${a.id}, this)">
+          <td><span class="expand-icon">▶</span>${a.artikelnummer}</td>
+          <td>${a.omschrijving || ''}</td>
+          <td>${badge}</td>
+          <td>${a.n_calls}</td>
+          <td>${a.n_fouten}</td>
+          <td style="color:#6B7280;font-size:11px;">${(a.tijdstip||'').replace('T',' ')}</td>
+        </tr>
+        <tr class="detail-rij" id="artikel-detail-${a.id}">
+          <td class="detail-cel" colspan="6">
+            <div class="detail-inhoud" id="artikel-inhoud-${a.id}"><em>Laden...</em></div>
+          </td>
+        </tr>
+      `;
+    }
+
+    html += '</tbody></table>';
+    inhoud.innerHTML = html;
+  } catch (e) {
+    inhoud.innerHTML = '<em style="color:#DC2626">Fout bij laden: ' + e + '</em>';
+  }
+}
+
+async function toggleArtikel(artikelId, rij) {
+  const detailRij = document.getElementById('artikel-detail-' + artikelId);
+  const inhoud    = document.getElementById('artikel-inhoud-' + artikelId);
+  const icon      = rij.querySelector('.expand-icon');
+  const isOpen    = detailRij.classList.contains('open');
+
+  if (isOpen) {
+    detailRij.classList.remove('open');
+    icon.textContent = '▶';
+    return;
+  }
+
+  detailRij.classList.add('open');
+  icon.textContent = '▼';
+
+  if (inhoud.dataset.geladen) return;
+  inhoud.dataset.geladen = '1';
+
+  try {
+    const resp  = await fetch('/push-geschiedenis?artikel_id=' + artikelId);
+    const calls = await resp.json();
+
+    if (!calls.length) {
+      inhoud.innerHTML = '<em style="color:#6B7280">Geen calls gelogd.</em>';
+      return;
+    }
+
+    let html = `
+      <table class="subtabel">
+        <thead><tr>
+          <th>Operatie</th><th>Veld</th>
+          <th>Oude waarde</th><th>Nieuwe waarde</th>
+          <th>Status</th><th>Foutmelding</th>
+        </tr></thead>
+        <tbody>
+    `;
+
+    for (const c of calls) {
+      const rowClass = c.king_status === 0 ? 'call-ok' : (c.king_status === 1 ? 'call-fout' : '');
+      const diff     = diffWaarden(c.oude_waarde, c.nieuwe_waarde);
+      html += `
+        <tr class="${rowClass}">
+          <td style="white-space:nowrap">${c.operatie}</td>
+          <td style="color:#6B7280">${c.veld_naam || '—'}</td>
+          <td>${diff.oud}</td>
+          <td>${diff.nieuw}</td>
+          <td>${badgeStatus(c.king_status === 0 ? 'gelukt' : c.king_status === null ? 'bezig' : 'mislukt')}</td>
+          <td style="color:#DC2626">${c.foutmelding || ''}</td>
+        </tr>
+      `;
+    }
+
+    html += '</tbody></table>';
+    inhoud.innerHTML = html;
+  } catch (e) {
+    inhoud.innerHTML = '<em style="color:#DC2626">Fout bij laden: ' + e + '</em>';
+  }
+}
+
+function diffWaarden(oud, nieuw) {
+  const oudTekst  = (oud  || '').trim();
+  const nieuwTekst = (nieuw || '').trim();
+
+  const trunc = (t, n=120) => t.length > n ? t.slice(0, n) + '…' : t;
+
+  if (!oudTekst) {
+    return {
+      oud:  '<span class="geen-wijz">nieuw</span>',
+      nieuw: `<span class="diff-nieuw">${escHtml(trunc(nieuwTekst))}</span>`,
+    };
+  }
+  if (oudTekst === nieuwTekst) {
+    return {
+      oud:  '<span class="geen-wijz">ongewijzigd</span>',
+      nieuw: escHtml(trunc(nieuwTekst)),
+    };
+  }
+  return {
+    oud:  `<span class="diff-oud">${escHtml(trunc(oudTekst))}</span>`,
+    nieuw: `<span class="diff-nieuw">${escHtml(trunc(nieuwTekst))}</span>`,
+  };
+}
+
+function badgeStatus(status) {
+  const map = {
+    gelukt:      'badge-ok',
+    gedeeltelijk:'badge-deel',
+    mislukt:     'badge-fout',
+    bezig:       'badge-bezig',
+  };
+  return `<span class="badge ${map[status] || ''}">${status}</span>`;
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nieuw Product – KING Import Generator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; background: #F5F7FA; color: #1F2933; }
+
+  header {
+    background: #002B5C; color: #fff; padding: 14px 24px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  header a { color: #00A3A1; font-size: 13px; text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  .logo { font-size: 22px; font-weight: bold; }
+  .titel { font-size: 14px; color: #00A3A1; flex: 1; }
+
+  main { max-width: 900px; margin: 32px auto; padding: 0 16px; }
+
+  .kaart {
+    background: #fff; border-radius: 8px; border: 1px solid #DDE1E7;
+    padding: 24px; margin-bottom: 20px;
+  }
+  .kaart h2 { color: #002B5C; font-size: 15px; margin-bottom: 16px; }
+
+  /* Mode toggle */
+  .modus-tabs { display: flex; gap: 0; margin-bottom: 24px; border-radius: 6px; overflow: hidden; border: 1px solid #CBD5E1; }
+  .modus-tab {
+    flex: 1; padding: 10px 16px; cursor: pointer; text-align: center;
+    font-size: 14px; font-weight: bold; background: #F5F7FA; color: #6B7280;
+    border: none; transition: all .15s;
+  }
+  .modus-tab.actief { background: #002B5C; color: #fff; }
+  .modus-tab:hover:not(.actief) { background: #E5E7EB; color: #374151; }
+
+  label { font-size: 13px; display: block; margin-bottom: 5px; color: #374151; font-weight: 600; }
+  .hint { font-size: 11px; color: #9CA3AF; font-weight: normal; margin-left: 4px; }
+  input[type="text"], input[type="url"], textarea, select {
+    width: 100%; padding: 8px 10px; border: 1px solid #CBD5E1;
+    border-radius: 5px; font-size: 13px; background: #fff; color: #1F2933;
+  }
+  input:focus, textarea:focus { outline: none; border-color: #002B5C; }
+  textarea { resize: vertical; min-height: 72px; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .veld { margin-bottom: 14px; }
+
+  .sectie-titel {
+    font-size: 11px; font-weight: bold; letter-spacing: .06em;
+    color: #6B7280; text-transform: uppercase; margin: 20px 0 12px;
+    padding-bottom: 6px; border-bottom: 1px solid #E5E7EB;
+  }
+
+  /* Children tabel */
+  .children-wrapper { margin-top: 8px; }
+  .children-header {
+    display: grid; grid-template-columns: 2fr 3fr 1.5fr 1.5fr 36px;
+    gap: 8px; font-size: 11px; font-weight: bold; color: #6B7280;
+    text-transform: uppercase; letter-spacing: .05em;
+    padding: 6px 4px 4px; border-bottom: 2px solid #E5E7EB; margin-bottom: 4px;
+  }
+  .child-rij {
+    display: grid; grid-template-columns: 2fr 3fr 1.5fr 1.5fr 36px;
+    gap: 8px; margin-bottom: 6px; align-items: center;
+  }
+  .child-rij input { padding: 6px 8px; font-size: 12px; }
+  .btn-verwijder {
+    background: none; border: 1px solid #E5E7EB; border-radius: 4px;
+    color: #9CA3AF; cursor: pointer; font-size: 16px; line-height: 1;
+    padding: 4px 6px; transition: all .15s;
+  }
+  .btn-verwijder:hover { background: #FEE2E2; border-color: #FCA5A5; color: #DC2626; }
+  .btn-add-child {
+    background: none; border: 1px dashed #CBD5E1; border-radius: 5px;
+    color: #6B7280; cursor: pointer; font-size: 13px; padding: 8px 16px;
+    width: 100%; margin-top: 6px; transition: all .15s;
+  }
+  .btn-add-child:hover { border-color: #002B5C; color: #002B5C; background: #EEF2FF; }
+
+  .verberg { display: none !important; }
+
+  .btn {
+    display: inline-block; padding: 10px 28px; border: none; border-radius: 5px;
+    font-size: 14px; font-weight: bold; cursor: pointer;
+  }
+  .btn-primair { background: #002B5C; color: #fff; }
+  .btn-primair:hover { background: #00A3A1; }
+  .btn-terug {
+    background: #E5E7EB; color: #374151; font-size: 13px;
+    padding: 8px 18px;
+  }
+
+  .status-box {
+    padding: 12px 16px; border-radius: 6px; font-size: 13px;
+    margin-top: 14px; display: none;
+  }
+  .status-ok  { background: #D1FAE5; color: #065F46; border: 1px solid #6EE7B7; }
+  .status-err { background: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; }
+
+  .required-star { color: #DC2626; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">ERP</span>
+  <span class="titel">Product Import Generator – Nieuw product invoeren</span>
+  <a href="/">← Terug naar upload</a>
+</header>
+
+<main>
+
+  <div class="kaart">
+    <h2>Producttype</h2>
+    <div class="modus-tabs">
+      <button class="modus-tab actief" onclick="setModus('los')" id="tab-los">
+        Los artikel
+        <div style="font-size:11px;font-weight:normal;color:inherit;opacity:.75;">Eén zelfstandig product</div>
+      </button>
+      <button class="modus-tab" onclick="setModus('variant')" id="tab-variant">
+        Variantengroep
+        <div style="font-size:11px;font-weight:normal;color:inherit;opacity:.75;">Parent + child artikelen (kleur, maat…)</div>
+      </button>
+    </div>
+
+    <!-- ── LOS ARTIKEL ── -->
+    <div id="sectie-los">
+      <div class="grid-2">
+        <div class="veld">
+          <label>Artikelnummer <span class="required-star">*</span></label>
+          <input type="text" id="los-artnr" placeholder="bijv. 5630BNASCDV0">
+        </div>
+        <div class="veld">
+          <label>Merk <span class="required-star">*</span></label>
+          <input type="text" id="los-merk" placeholder="bijv. Jotun">
+        </div>
+      </div>
+      <div class="veld">
+        <label>Omschrijving <span class="required-star">*</span> <span class="hint">— volledige productnaam inclusief variant/inhoud</span></label>
+        <input type="text" id="los-oms" placeholder="bijv. Jotun Yachting Anti-Skid Coarse 3kg">
+      </div>
+      <div class="grid-3">
+        <div class="veld">
+          <label>EAN-code <span class="hint">(optioneel)</span></label>
+          <input type="text" id="los-ean" placeholder="8711347000000">
+        </div>
+        <div class="veld">
+          <label>Eenheid <span class="hint">(optioneel)</span></label>
+          <input type="text" id="los-eenheid" placeholder="Blik 3 kg">
+        </div>
+        <div class="veld">
+          <label>Opbrengstgroep <span class="hint">(optioneel)</span></label>
+          <input type="text" id="los-opbr" placeholder="bijv. 5630">
+        </div>
+      </div>
+      <div class="veld">
+        <label>URL leverancier <span class="hint">(optioneel — wordt gebruikt voor AI-tekst + PIB/VIB)</span></label>
+        <input type="url" id="los-url" placeholder="https://www.leverancier.nl/product/...">
+      </div>
+      <div class="veld">
+        <label>Productinformatieblad (pad of URL) <span class="hint">(optioneel)</span></label>
+        <input type="text" id="los-pib" placeholder="K:\1. Productinformatiebladen\Merk\NL\PIB.pdf">
+      </div>
+      <div class="veld">
+        <label>Extra informatie <span class="hint">(optioneel — specs, technische details voor AI)</span></label>
+        <textarea id="los-extra" placeholder="Bijv. dosering, droogtijd, dekking, technische specificaties…"></textarea>
+      </div>
+    </div>
+
+    <!-- ── VARIANTENGROEP ── -->
+    <div id="sectie-variant" class="verberg">
+
+      <div class="sectie-titel">Parent artikel (configureerbaar)</div>
+
+      <div class="grid-2">
+        <div class="veld">
+          <label>Parent artikelnummer <span class="required-star">*</span></label>
+          <input type="text" id="vr-parent-artnr" placeholder="bijv. 37VA56360000WEB">
+        </div>
+        <div class="veld">
+          <label>Merk <span class="required-star">*</span></label>
+          <input type="text" id="vr-merk" placeholder="bijv. Hempel">
+        </div>
+      </div>
+      <div class="veld">
+        <label>Productnaam (generiek) <span class="required-star">*</span> <span class="hint">— zonder kleur/maat variant</span></label>
+        <input type="text" id="vr-oms" placeholder="bijv. Hempel Hempatex Enamel 56360">
+      </div>
+      <div class="grid-2">
+        <div class="veld">
+          <label>URL leverancier <span class="hint">(optioneel)</span></label>
+          <input type="url" id="vr-url" placeholder="https://www.hempel.com/...">
+        </div>
+        <div class="veld">
+          <label>Configuratie op <span class="hint">— komma-gescheiden attributen</span></label>
+          <input type="text" id="vr-config" value="Inhoud,Kleur" placeholder="bijv. Inhoud,Kleur">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="veld">
+          <label>Productinformatieblad <span class="hint">(optioneel)</span></label>
+          <input type="text" id="vr-pib" placeholder="K:\…\PIB.pdf of https://…/tds.pdf">
+        </div>
+        <div class="veld">
+          <label>Opbrengstgroep <span class="hint">(optioneel)</span></label>
+          <input type="text" id="vr-opbr" placeholder="bijv. 3705">
+        </div>
+      </div>
+      <div class="veld">
+        <label>Extra informatie <span class="hint">(optioneel — geldt voor alle varianten)</span></label>
+        <textarea id="vr-extra" placeholder="Bijv. productomschrijving, technische specs, toepassingen…"></textarea>
+      </div>
+
+      <div class="sectie-titel">Child artikelen (simpel, niet individueel zichtbaar)</div>
+
+      <div class="children-wrapper">
+        <div class="children-header">
+          <span>Artikelnummer</span>
+          <span>Omschrijving (incl. variant)</span>
+          <span>EAN-code</span>
+          <span>Eenheid</span>
+          <span></span>
+        </div>
+        <div id="children-list"></div>
+        <button class="btn-add-child" onclick="voegChildToe()">+ Variant toevoegen</button>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="kaart" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+    <button class="btn btn-primair" onclick="submitFormulier()" id="submit-knop">
+      Genereren →
+    </button>
+    <a href="/" class="btn btn-terug">Annuleren</a>
+    <div id="status-box" class="status-box"></div>
+  </div>
+
+</main>
+
+<script>
+let modus = 'los';
+let childTeller = 0;
+
+function setModus(m) {
+  modus = m;
+  document.getElementById('tab-los').classList.toggle('actief', m === 'los');
+  document.getElementById('tab-variant').classList.toggle('actief', m === 'variant');
+  document.getElementById('sectie-los').classList.toggle('verberg', m !== 'los');
+  document.getElementById('sectie-variant').classList.toggle('verberg', m !== 'variant');
+}
+
+function voegChildToe(artnr='', oms='', ean='', eenheid='') {
+  childTeller++;
+  const id = childTeller;
+  const div = document.createElement('div');
+  div.className = 'child-rij';
+  div.id = 'child-' + id;
+  div.innerHTML = `
+    <input type="text" id="c-artnr-${id}" value="${artnr}" placeholder="bijv. 3705636010000005">
+    <input type="text" id="c-oms-${id}"   value="${oms}"   placeholder="bijv. Hempatex 56360 RAL1000 5L">
+    <input type="text" id="c-ean-${id}"   value="${ean}"   placeholder="">
+    <input type="text" id="c-een-${id}"   value="${eenheid}" placeholder="bijv. Blik 5 liter">
+    <button class="btn-verwijder" onclick="verwijderChild(${id})" title="Verwijderen">&times;</button>
+  `;
+  document.getElementById('children-list').appendChild(div);
+}
+
+function verwijderChild(id) {
+  const el = document.getElementById('child-' + id);
+  if (el) el.remove();
+}
+
+function toonStatus(msg, type) {
+  const box = document.getElementById('status-box');
+  box.textContent = msg;
+  box.className = 'status-box ' + (type === 'ok' ? 'status-ok' : 'status-err');
+  box.style.display = 'block';
+}
+
+async function submitFormulier() {
+  const knop = document.getElementById('submit-knop');
+  knop.disabled = true;
+  knop.textContent = 'Bezig…';
+
+  let payload;
+  try {
+    if (modus === 'los') {
+      const artnr = document.getElementById('los-artnr').value.trim();
+      const oms   = document.getElementById('los-oms').value.trim();
+      const merk  = document.getElementById('los-merk').value.trim();
+      if (!artnr || !oms || !merk) {
+        toonStatus('Vul minstens Artikelnummer, Omschrijving en Merk in.', 'err');
+        knop.disabled = false; knop.textContent = 'Genereren →'; return;
+      }
+      payload = {
+        type: 'los',
+        producten: [{
+          Artikelnummer: artnr,
+          Omschrijving:  oms,
+          Merk:          merk,
+          EanCode:       document.getElementById('los-ean').value.trim(),
+          Eenheid:       document.getElementById('los-eenheid').value.trim(),
+          Opbrengstgroep: document.getElementById('los-opbr').value.trim(),
+          URL_leverancier: document.getElementById('los-url').value.trim(),
+          Productinformatieblad_pad: document.getElementById('los-pib').value.trim(),
+          Extra_info: document.getElementById('los-extra').value.trim(),
+        }]
+      };
+
+    } else {
+      const parentArtnr = document.getElementById('vr-parent-artnr').value.trim();
+      const merk        = document.getElementById('vr-merk').value.trim();
+      const oms         = document.getElementById('vr-oms').value.trim();
+      const config      = document.getElementById('vr-config').value.trim();
+      if (!parentArtnr || !oms || !merk) {
+        toonStatus('Vul minstens Parent artikelnummer, Productnaam en Merk in.', 'err');
+        knop.disabled = false; knop.textContent = 'Genereren →'; return;
+      }
+
+      const children = [];
+      document.querySelectorAll('.child-rij').forEach(rij => {
+        const id = rij.id.replace('child-', '');
+        const cartnr = document.getElementById('c-artnr-' + id)?.value.trim();
+        const coms   = document.getElementById('c-oms-'   + id)?.value.trim();
+        if (cartnr && coms) {
+          children.push({
+            Artikelnummer: cartnr,
+            Omschrijving:  coms,
+            EanCode:       document.getElementById('c-ean-' + id)?.value.trim() || '',
+            Eenheid:       document.getElementById('c-een-' + id)?.value.trim() || '',
+          });
+        }
+      });
+      if (children.length === 0) {
+        toonStatus('Voeg minstens één child artikel toe.', 'err');
+        knop.disabled = false; knop.textContent = 'Genereren →'; return;
+      }
+
+      const gemeenschappelijk = {
+        Merk:  merk,
+        URL_leverancier: document.getElementById('vr-url').value.trim(),
+        Productinformatieblad_pad: document.getElementById('vr-pib').value.trim(),
+        Extra_info: document.getElementById('vr-extra').value.trim(),
+        Opbrengstgroep: document.getElementById('vr-opbr').value.trim(),
+      };
+
+      const producten = [
+        {
+          Artikelnummer: parentArtnr,
+          Omschrijving:  oms,
+          _type: 'parent',
+          _configuratie_op: config,
+          ...gemeenschappelijk,
+        },
+        ...children.map(c => ({
+          ...c,
+          _type: 'child',
+          _parent_code: parentArtnr,
+          _configuratie_op: config,
+          ...gemeenschappelijk,
+        })),
+      ];
+      payload = { type: 'variant', producten };
+    }
+
+    const resp = await fetch('/formulier-submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+
+    if (!data.ok) {
+      toonStatus('Fout: ' + data.error, 'err');
+      knop.disabled = false; knop.textContent = 'Genereren →';
+      return;
+    }
+
+    toonStatus(`${data.count} product(en) klaar – doorsturen naar verwerking…`, 'ok');
+    setTimeout(() => { window.location.href = '/?gestart=1'; }, 600);
+
+  } catch (e) {
+    toonStatus('Onverwachte fout: ' + e, 'err');
+    knop.disabled = false; knop.textContent = 'Genereren →';
+  }
+}
+
+// Initieel één child-rij
+voegChildToe();
+</script>
+</body>
+</html>
